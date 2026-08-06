@@ -10485,6 +10485,31 @@ func TestGetBuildAppEncryptionDeclaration(t *testing.T) {
 	}
 }
 
+func TestGetBuildAppEncryptionDeclarationNullDataReturnsNotFound(t *testing.T) {
+	response := jsonResponse(http.StatusOK, `{"data":null,"links":{"self":"https://api.appstoreconnect.apple.com/v1/builds/build-1/appEncryptionDeclaration"}}`)
+	client := newTestClient(t, func(req *http.Request) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/builds/build-1/appEncryptionDeclaration" {
+			t.Fatalf("expected path /v1/builds/build-1/appEncryptionDeclaration, got %s", req.URL.Path)
+		}
+		assertAuthorized(t, req)
+	}, response)
+
+	_, err := client.GetBuildAppEncryptionDeclaration(context.Background(), "build-1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	var missingErr MissingBuildAppEncryptionDeclarationError
+	if !errors.As(err, &missingErr) {
+		t.Fatalf("expected MissingBuildAppEncryptionDeclarationError, got %T", err)
+	}
+	if missingErr.BuildID != "build-1" {
+		t.Fatalf("expected build id build-1, got %q", missingErr.BuildID)
+	}
+}
+
 func TestCreateAppEncryptionDeclaration(t *testing.T) {
 	response := jsonResponse(http.StatusCreated, `{"data":{"type":"appEncryptionDeclarations","id":"decl-1","attributes":{"appDescription":"Uses TLS"}}}`)
 	client := newTestClient(t, func(req *http.Request) {

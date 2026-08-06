@@ -1,6 +1,7 @@
 package asc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,24 @@ import (
 	"strconv"
 	"strings"
 )
+
+// MissingBuildAppEncryptionDeclarationError indicates that ASC returned a null
+// app encryption declaration relationship for an otherwise valid build.
+type MissingBuildAppEncryptionDeclarationError struct {
+	BuildID string
+}
+
+func (e MissingBuildAppEncryptionDeclarationError) Error() string {
+	buildID := strings.TrimSpace(e.BuildID)
+	if buildID == "" {
+		return "app encryption declaration not found"
+	}
+	return fmt.Sprintf("app encryption declaration not found for build %q", buildID)
+}
+
+func (e MissingBuildAppEncryptionDeclarationError) Unwrap() error {
+	return ErrNotFound
+}
 
 // BuildAttributes describes a build resource.
 type BuildAttributes struct {
@@ -292,6 +311,18 @@ func (c *Client) GetBuildAppEncryptionDeclaration(ctx context.Context, buildID s
 	data, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	// ASC returns HTTP 200 with {"data":null} when the build has no attached
+	// app encryption declaration. Do not decode null into a zero-value resource.
+	if bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) {
+		return nil, MissingBuildAppEncryptionDeclarationError{BuildID: buildID}
 	}
 
 	var response AppEncryptionDeclarationResponse
