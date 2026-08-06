@@ -752,7 +752,7 @@ Creates the initial app availability record and its territory availability
 entries through the public App Store Connect API. Apple can reject this
 bootstrap request even when it matches the published schema. If that happens,
 the command fails without treating availability as configured and explains the
-authenticated web-session or App Store Connect fallback. Once created, use
+App Store Connect browser fallback. Once created, use
 "asc pricing availability edit" to update the record.
 
 Examples:
@@ -818,7 +818,7 @@ Examples:
 			if err != nil {
 				if isAvailabilityBootstrapRelationshipRejection(err) {
 					return fmt.Errorf(
-						"pricing availability create: Apple rejected the initial availability request through the public API; availability was not configured. Authenticate a web session with \"asc web auth login --apple-id EMAIL\", then retry with \"asc web apps availability create\", or configure Pricing and Availability in App Store Connect: %w",
+						"pricing availability create: Apple rejected the initial availability request through the public API; availability was not configured. Configure Pricing and Availability in App Store Connect: %w",
 						err,
 					)
 				}
@@ -858,9 +858,7 @@ Examples:
 Note:
   This command only updates an existing app availability. If the app has no
   availability record yet, use "asc pricing availability create" first. If
-  Apple rejects public-API bootstrap, authenticate with
-  "asc web auth login --apple-id EMAIL" and use
-  "asc web apps availability create", or configure Pricing and Availability in
+  Apple rejects public-API bootstrap, configure Pricing and Availability in
   App Store Connect.`,
 		ErrorPrefix:                      "pricing availability edit",
 		IncludeAvailableInNewTerritories: true,

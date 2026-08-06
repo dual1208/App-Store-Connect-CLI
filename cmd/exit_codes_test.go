@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/peterbourgon/ff/v3/ffcli"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,16 +20,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
-
-	"github.com/creack/pty"
-	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
-	webcore "github.com/dual1208/App-Store-Connect-CLI/internal/web"
 )
 
 func TestExitCodeFromError(t *testing.T) {
@@ -60,11 +55,6 @@ func TestExitCodeFromError(t *testing.T) {
 		{
 			name:     "ErrForbidden returns auth failure",
 			err:      asc.ErrForbidden,
-			expected: ExitAuth,
-		},
-		{
-			name:     "wrapped invalid Apple Account credentials return auth failure",
-			err:      fmt.Errorf("SRP login failed: %w", webcore.ErrInvalidAppleAccountCredentials),
 			expected: ExitAuth,
 		},
 		{
@@ -756,80 +746,6 @@ func TestPublishAppStoreEmptyMetadataDirExitCode(t *testing.T) {
 	}
 }
 
-func TestPublishAppStoreMissingMetadataDirExitCode(t *testing.T) {
-	tmpDir := t.TempDir()
-	binaryPath := buildASCBlackboxBinary(t)
-
-	missingMetadataDir := filepath.Join(tmpDir, "missing-metadata")
-	runCmd := exec.Command(
-		binaryPath,
-		"publish", "appstore",
-		"--app", "APP_ID",
-		"--workspace", "Demo.xcworkspace",
-		"--scheme", "Demo",
-		"--version", "1.0.0",
-		"--build-number", "42",
-		"--metadata-dir", missingMetadataDir,
-		"--dry-run",
-	)
-	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
-	output, err := runCmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected non-zero exit for missing metadata-dir value, got success output: %s", output)
-	}
-
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
-	}
-	if exitErr.ExitCode() != ExitUsage {
-		t.Fatalf("expected exit code %d, got %d (output: %s)", ExitUsage, exitErr.ExitCode(), output)
-	}
-
-	stderr := string(output)
-	if !strings.Contains(stderr, "metadata-dir") {
-		t.Fatalf("expected stderr to mention metadata-dir flag, got %q", stderr)
-	}
-	if !strings.Contains(stderr, "failed to read") {
-		t.Fatalf("expected stderr to contain missing directory message, got %q", stderr)
-	}
-}
-
-func TestWebAuthLoginLegacyTwoFactorFlagExitCode(t *testing.T) {
-	tmpDir := t.TempDir()
-	binaryPath := buildASCBlackboxBinary(t)
-
-	runCmd := exec.Command(
-		binaryPath,
-		"web", "auth", "login",
-		"--two-factor-code", "123456",
-	)
-	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
-	output, err := runCmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected non-zero exit when apple-id is missing, got success output: %s", output)
-	}
-
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
-	}
-	if exitErr.ExitCode() != ExitUsage {
-		t.Fatalf("expected exit code %d, got %d (output: %s)", ExitUsage, exitErr.ExitCode(), output)
-	}
-
-	stderr := string(output)
-	if !strings.Contains(stderr, "Warning: `--two-factor-code` is deprecated.") {
-		t.Fatalf("expected deprecated flag warning, got %q", stderr)
-	}
-	if !strings.Contains(stderr, "--apple-id is required when no cached web session is available") {
-		t.Fatalf("expected usage error after successful parsing, got %q", stderr)
-	}
-	if strings.Contains(stderr, "flag provided but not defined: -two-factor-code") {
-		t.Fatalf("did not expect unknown flag parse failure, got %q", stderr)
-	}
-}
-
 func TestAuthTokenConfirmInvalidBooleanExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
 	binaryPath := buildASCBlackboxBinary(t)
@@ -856,124 +772,6 @@ func TestAuthTokenConfirmInvalidBooleanExitCode(t *testing.T) {
 	if !strings.Contains(stderr, "confirm") {
 		t.Fatalf("expected stderr to mention confirm flag, got %q", stderr)
 	}
-}
-
-func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
-	tmpDir := t.TempDir()
-	binaryPath := buildASCBlackboxBinary(t)
-
-	runCmd := exec.Command(binaryPath, "web", "auth", "login", "--apple-id", "user@example.com")
-	runCmd.Env = append(
-		isolatedCLITestEnv(filepath.Join(tmpDir, "config.json")),
-		"ASC_WEB_SESSION_CACHE=1",
-		"ASC_WEB_SESSION_CACHE_DIR="+filepath.Join(tmpDir, "web-session-cache"),
-		"ASC_WEB_PASSWORD_STORE_DIR="+filepath.Join(tmpDir, "web-passwords"),
-	)
-
-	ptmx, err := pty.Start(runCmd)
-	if err != nil {
-		t.Fatalf("failed to start PTY command: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
-
-	output, promptSeen, readDone := startPTYCapture(ptmx, "Apple Account password:")
-
-	select {
-	case <-promptSeen:
-	case readErr := <-readDone:
-		t.Fatalf("process exited before password prompt: %v\noutput:\n%s", readErr, output.String())
-	case <-time.After(10 * time.Second):
-		t.Fatalf("timed out waiting for password prompt\noutput:\n%s", output.String())
-	}
-
-	if _, err := ptmx.Write([]byte{3}); err != nil {
-		t.Fatalf("failed to send Ctrl+C to PTY: %v", err)
-	}
-
-	waitDone := make(chan error, 1)
-	go func() {
-		waitDone <- runCmd.Wait()
-	}()
-
-	var runErr error
-	select {
-	case runErr = <-waitDone:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("process did not exit promptly after interrupt\noutput:\n%s", output.String())
-	}
-
-	select {
-	case <-readDone:
-	case <-time.After(2 * time.Second):
-		// Let the child close the PTY so the reader can drain the final
-		// interrupt-specific stderr before we tear the PTY down ourselves.
-		t.Fatalf("PTY reader did not exit after process completion\noutput:\n%s", output.String())
-	}
-
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit after interrupt\noutput:\n%s", output.String())
-	}
-
-	var exitErr *exec.ExitError
-	if !errors.As(runErr, &exitErr) {
-		t.Fatalf("expected *exec.ExitError, got %T (%v)", runErr, runErr)
-	}
-	if exitErr.ExitCode() == ExitUsage {
-		t.Fatalf("expected non-usage exit code after interrupt, got %d\noutput:\n%s", exitErr.ExitCode(), output.String())
-	}
-
-	// Some CI PTYs deliver Ctrl+C as a signal and close before the child process
-	// can flush the prompt-interrupted diagnostic. The important CLI contract
-	// here is that interrupts do not fall back to usage-style password errors.
-	stderr := output.String()
-	if strings.Contains(stderr, "password is required") {
-		t.Fatalf("expected no password-required fallback after interrupt, got %q", stderr)
-	}
-}
-
-type ptyOutput struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (o *ptyOutput) Write(p []byte) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	_, _ = o.buf.Write(p)
-}
-
-func (o *ptyOutput) String() string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.buf.String()
-}
-
-func startPTYCapture(ptmx *os.File, prompt string) (*ptyOutput, <-chan struct{}, <-chan error) {
-	output := &ptyOutput{}
-	promptSeen := make(chan struct{})
-	readDone := make(chan error, 1)
-	var promptOnce sync.Once
-
-	go func() {
-		buf := make([]byte, 256)
-		for {
-			n, err := ptmx.Read(buf)
-			if n > 0 {
-				output.Write(buf[:n])
-				if prompt != "" && strings.Contains(output.String(), prompt) {
-					promptOnce.Do(func() {
-						close(promptSeen)
-					})
-				}
-			}
-			if err != nil {
-				readDone <- err
-				return
-			}
-		}
-	}()
-
-	return output, promptSeen, readDone
 }
 
 func isolatedCLITestEnv(configPath string) []string {

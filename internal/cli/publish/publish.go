@@ -20,14 +20,30 @@ const (
 	publishDefaultTimeout    = 30 * time.Minute
 	publishPlanStatusPlanned = "planned"
 
-	publishPlanStepArchiveLocalBuild      = "archive_local_build"
-	publishPlanStepExportLocalBuild       = "export_local_build"
 	publishPlanStepUploadBuild            = "upload_build"
 	publishPlanStepWaitForBuildProcessing = "wait_for_build_processing"
 	publishPlanStepEnsureVersion          = "ensure_version"
 	publishPlanStepApplyMetadata          = "apply_metadata"
 	publishPlanStepAttachBuild            = "attach_build"
 	publishPlanStepSubmitReview           = "submit_review"
+)
+
+var (
+	getPublishASCClientFn = func(timeout time.Duration) (*asc.Client, error) {
+		if timeout > 0 {
+			return shared.GetASCClientWithTimeout(timeout)
+		}
+		return shared.GetASCClient()
+	}
+	validatePublishIPAPathFn        = shared.ValidateIPAPath
+	uploadBuildAndWaitForIDFn       = uploadBuildAndWaitForID
+	resolvePublishAppIDWithLookupFn = func(ctx context.Context, client *asc.Client, appID string) (string, error) {
+		return shared.ResolveAppIDWithLookup(ctx, client, appID)
+	}
+	waitForPublishBuildProcessingFn = func(ctx context.Context, client *asc.Client, buildID string, pollInterval time.Duration) (*asc.BuildResponse, error) {
+		return client.WaitForBuildProcessing(ctx, buildID, pollInterval)
+	}
+	applyPublishVersionMetadataFn = applyPublishVersionMetadata
 )
 
 // PublishCommand returns the publish command with subcommands.
@@ -76,17 +92,16 @@ func PublishTestFlightCommand() *ffcli.Command {
 	timeout := fs.Duration("timeout", 0, "Override upload + processing timeout (e.g., 30m)")
 	testNotes := fs.String("test-notes", "", "What to Test notes for the build")
 	locale := fs.String("locale", "", "Locale for --test-notes (e.g., en-US)")
-	localBuild := bindPublishLocalBuildFlags(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "testflight",
 		ShortUsage: "asc publish testflight [flags]",
 		ShortHelp:  "Upload and distribute to TestFlight.",
-		LongHelp: `Upload or local-build a binary and distribute it to TestFlight beta groups.
+		LongHelp: `Upload an IPA or select an existing build and distribute it to TestFlight beta groups.
 
 Steps:
-1. Build locally with Xcode or upload an IPA (unless --build/--build-number is provided)
+1. Upload an IPA (unless --build/--build-number is provided)
 2. Wait for processing when needed (--wait, --test-notes, or --submit)
 3. Add build to specified beta groups
 4. Optionally notify testers
@@ -94,7 +109,6 @@ Steps:
 
 Examples:
   asc publish testflight --app "123" --ipa app.ipa --group "GROUP_ID"
-  asc publish testflight --app "123" --workspace App.xcworkspace --scheme App --version 1.2.3 --group "GROUP_ID"
   asc publish testflight --app "123" --ipa app.ipa --group "External Testers"
   asc publish testflight --app "123" --ipa app.ipa --group "G1,G2" --wait --notify
   asc publish testflight --app "123" --ipa app.ipa --group "External Testers" --submit --confirm
@@ -110,31 +124,12 @@ Examples:
 				return shared.MissingRequiredUsageError()
 			}
 
-			setFlags := collectSetFlags(fs)
 			ipaValue := strings.TrimSpace(*ipaPath)
 			buildIDValue := strings.TrimSpace(*buildID)
 			buildNumberValue := strings.TrimSpace(*buildNumber)
 			versionValue := strings.TrimSpace(*version)
-			localBuildMode := localBuild.localBuildMode()
-			if err := validateLocalBuildFlagUsage(localBuildMode, setFlags); err != nil {
-				return err
-			}
-
 			uploadMode := ipaValue != ""
 			switch {
-			case localBuildMode:
-				if err := validateLocalBuildSelectors(localBuild); err != nil {
-					return err
-				}
-				if uploadMode {
-					return shared.UsageError("--ipa cannot be combined with --workspace or --project")
-				}
-				if buildIDValue != "" {
-					return shared.UsageError("--build cannot be combined with --workspace or --project")
-				}
-				if versionValue == "" {
-					return shared.UsageError("--version is required")
-				}
 			case uploadMode:
 				if buildIDValue != "" {
 					return shared.UsageError("--ipa and --build are mutually exclusive")
@@ -217,25 +212,15 @@ Examples:
 				return shared.ContextWithTimeoutDuration(ctx, timeoutValue)
 			}
 			requestCtx, cancel := newPublishRequestCtx()
-			if !localBuildMode {
-				defer cancel()
-			}
+			defer cancel()
 
 			resolvedPublishAppID := resolvedAppInput
-			preflightCtx := requestCtx
-			if localBuildMode {
-				cancel()
-				var preflightCancel context.CancelFunc
-				preflightCtx, preflightCancel = newPublishRequestCtx()
-				defer preflightCancel()
-			}
-			resolvedPublishAppID, err = resolvePublishAppIDWithLookupFn(preflightCtx, client, resolvedPublishAppID)
+			resolvedPublishAppID, err = resolvePublishAppIDWithLookupFn(requestCtx, client, resolvedPublishAppID)
 			if err != nil {
 				return fmt.Errorf("publish testflight: resolve app: %w", err)
 			}
 
-			groupLookupCtx := preflightCtx
-			resolvedGroups, err := resolvePublishBetaGroups(groupLookupCtx, client, resolvedPublishAppID, parsedGroupIDs)
+			resolvedGroups, err := resolvePublishBetaGroups(requestCtx, client, resolvedPublishAppID, parsedGroupIDs)
 			if err != nil {
 				return fmt.Errorf("publish testflight: %w", err)
 			}
@@ -246,30 +231,8 @@ Examples:
 			resolvedVersionValue := ""
 			resolvedBuildNumberValue := ""
 			mode := asc.PublishModeExistingBuild
-			var localBuildResult *publishLocalBuildExecutionResult
-
 			var buildResp *asc.BuildResponse
-			if localBuildMode {
-				buildNumberValue, err = resolvePublishBuildNumber(preflightCtx, client, resolvedPublishAppID, versionValue, normalizedPlatform, localBuild, buildNumberValue)
-				if err != nil {
-					return fmt.Errorf("publish testflight: %w", err)
-				}
-				localBuildConfig, err := resolveLocalBuildConfig(localBuild, normalizedPlatform, versionValue, buildNumberValue)
-				if err != nil {
-					return fmt.Errorf("publish testflight: %w", err)
-				}
-				localBuildResult, err = runPublishLocalBuild(ctx, client, resolvedPublishAppID, normalizedPlatform, versionValue, buildNumberValue, *pollInterval, timeoutValue, timeoutOverride, localBuildConfig)
-				if err != nil {
-					return fmt.Errorf("publish testflight: %w", err)
-				}
-				requestCtx, cancel = newPublishRequestCtx()
-				defer cancel()
-				buildResp = localBuildResult.Build
-				uploaded = localBuildResult.Uploaded
-				resolvedVersionValue = localBuildResult.Version
-				resolvedBuildNumberValue = localBuildResult.BuildNumber
-				mode = asc.PublishModeLocalBuild
-			} else if uploadMode {
+			if uploadMode {
 				uploadResult, err := uploadBuildAndWaitForIDFn(
 					requestCtx,
 					client,
@@ -370,23 +333,6 @@ Examples:
 				BetaReviewSubmitted:    betaReviewSubmitted,
 				BetaReviewSubmissionID: submissionResult.SubmissionID,
 			}
-			if localBuildResult != nil {
-				result.Archive = localBuildResult.Archive
-				result.Export = localBuildResult.Export
-				result.Publish = &asc.TestFlightPublishStageResult{
-					BuildID:                result.BuildID,
-					BuildVersion:           result.BuildVersion,
-					BuildNumber:            result.BuildNumber,
-					GroupIDs:               append([]string(nil), result.GroupIDs...),
-					Uploaded:               result.Uploaded,
-					ProcessingState:        result.ProcessingState,
-					Notified:               result.Notified,
-					NotificationAction:     result.NotificationAction,
-					BetaReviewSubmitted:    result.BetaReviewSubmitted,
-					BetaReviewSubmissionID: result.BetaReviewSubmissionID,
-				}
-			}
-
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
@@ -397,7 +343,7 @@ func PublishAppStoreCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("publish appstore", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (required, or ASC_APP_ID env)")
-	ipaPath := fs.String("ipa", "", "Path to .ipa file (required unless local-build mode is used)")
+	ipaPath := fs.String("ipa", "", "Path to .ipa file (required)")
 	version := fs.String("version", "", "App Store version string (defaults to IPA version)")
 	buildNumber := fs.String("build-number", "", "CFBundleVersion (auto-extracted from IPA if not provided)")
 	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
@@ -408,7 +354,6 @@ func PublishAppStoreCommand() *ffcli.Command {
 	wait := fs.Bool("wait", false, "Wait for build processing")
 	pollInterval := fs.Duration("poll-interval", shared.PublishDefaultPollInterval, "Polling interval for --wait and build discovery")
 	timeout := fs.Duration("timeout", 0, "Override upload + processing timeout; also applies to submission with --submit (e.g., 30m)")
-	localBuild := bindPublishLocalBuildFlags(fs)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -418,7 +363,7 @@ func PublishAppStoreCommand() *ffcli.Command {
 		LongHelp: `Use this as the canonical high-level App Store publish command.
 
 Workflow:
-1. Build locally with Xcode or upload an IPA
+1. Upload an IPA
 2. Wait for build processing (if --wait)
 3. Find or create the App Store version
 4. Apply version localization metadata (if --metadata-dir)
@@ -434,7 +379,6 @@ Examples:
   asc publish appstore --app "123" --ipa app.ipa --version 1.2.3
   asc publish appstore --app "123" --ipa app.ipa --version 1.2.3 --metadata-dir ./metadata --submit --confirm
   asc publish appstore --app "123" --ipa app.ipa --version 1.2.3 --submit --dry-run
-  asc publish appstore --app "123" --workspace App.xcworkspace --scheme App --version 1.2.3
   asc publish appstore --app "123" --ipa app.ipa --version 1.2.3 --submit --confirm`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -450,30 +394,18 @@ Examples:
 				return shared.MissingRequiredUsageError()
 			}
 
-			setFlags := collectSetFlags(fs)
 			ipaValue := strings.TrimSpace(*ipaPath)
 			versionValue := strings.TrimSpace(*version)
 			buildNumberValue := strings.TrimSpace(*buildNumber)
 			metadataDirValue := strings.TrimSpace(*metadataDir)
-			localBuildMode := localBuild.localBuildMode()
-			if err := validateLocalBuildFlagUsage(localBuildMode, setFlags); err != nil {
-				return err
+			if metadataDirValue == "" && fs.Lookup("metadata-dir") != nil && strings.TrimSpace(*metadataDir) == "" {
+				metadataDirWasSet := false
+				fs.Visit(func(f *flag.Flag) { metadataDirWasSet = metadataDirWasSet || f.Name == "metadata-dir" })
+				if metadataDirWasSet {
+					return shared.UsageError("--metadata-dir cannot be empty")
+				}
 			}
-			if setFlags["metadata-dir"] && metadataDirValue == "" {
-				return shared.UsageError("--metadata-dir cannot be empty")
-			}
-			switch {
-			case localBuildMode:
-				if err := validateLocalBuildSelectors(localBuild); err != nil {
-					return err
-				}
-				if ipaValue != "" {
-					return shared.UsageError("--ipa cannot be combined with --workspace or --project")
-				}
-				if versionValue == "" {
-					return shared.UsageError("--version is required")
-				}
-			case ipaValue == "":
+			if ipaValue == "" {
 				fmt.Fprintf(os.Stderr, "Error: --ipa is required\n\n")
 				return shared.MissingRequiredUsageError()
 			}
@@ -489,17 +421,14 @@ Examples:
 				return shared.UsageError(err.Error())
 			}
 
-			var fileInfo os.FileInfo
-			if ipaValue != "" {
-				fileInfo, err = validatePublishIPAPathFn(ipaValue)
-				if err != nil {
-					return fmt.Errorf("publish appstore: %w", err)
-				}
+			fileInfo, err := validatePublishIPAPathFn(ipaValue)
+			if err != nil {
+				return fmt.Errorf("publish appstore: %w", err)
+			}
 
-				versionValue, buildNumberValue, err = shared.ResolveBundleInfoForIPA(ipaValue, *version, *buildNumber)
-				if err != nil {
-					return fmt.Errorf("publish appstore: %w", err)
-				}
+			versionValue, buildNumberValue, err = shared.ResolveBundleInfoForIPA(ipaValue, *version, *buildNumber)
+			if err != nil {
+				return fmt.Errorf("publish appstore: %w", err)
 			}
 
 			var metadataValuesByLocale map[string]map[string]string
@@ -516,7 +445,6 @@ Examples:
 			platformValue := asc.Platform(normalizedPlatform)
 			timeoutOverride := *timeout > 0
 			mode := asc.PublishModeIPAUpload
-			var localBuildConfig publishLocalBuildConfig
 			timeoutValue := resolvePublishTimeout(*timeout)
 			newPublishRequestCtx := func() (context.Context, context.CancelFunc) {
 				return shared.ContextWithTimeoutDuration(ctx, timeoutValue)
@@ -527,76 +455,34 @@ Examples:
 			var cancel context.CancelFunc
 			resolvedPublishAppID := resolvedAppInput
 
-			if *dryRun && canPlanAppStorePublishWithoutASC(resolvedPublishAppID, localBuildMode, buildNumberValue) {
-				if localBuildMode {
-					localBuildConfig, err = resolveLocalBuildConfig(localBuild, normalizedPlatform, versionValue, buildNumberValue)
-					if err != nil {
-						return fmt.Errorf("publish appstore: %w", err)
-					}
-					mode = asc.PublishModeLocalBuild
-				}
+			if *dryRun && canPlanAppStorePublishWithoutASC(resolvedPublishAppID) {
 			} else {
 				client, err = getPublishASCClientFn(timeoutValue)
 				if err != nil {
 					return fmt.Errorf("publish appstore: %w", err)
 				}
 				requestCtx, cancel = newPublishRequestCtx()
-				if !localBuildMode {
-					defer cancel()
-				}
+				defer cancel()
 
-				preflightCtx := requestCtx
-				if localBuildMode {
-					cancel()
-					var preflightCancel context.CancelFunc
-					preflightCtx, preflightCancel = newPublishRequestCtx()
-					defer preflightCancel()
-				}
-				resolvedPublishAppID, err = resolvePublishAppIDWithLookupFn(preflightCtx, client, resolvedPublishAppID)
+				resolvedPublishAppID, err = resolvePublishAppIDWithLookupFn(requestCtx, client, resolvedPublishAppID)
 				if err != nil {
 					return fmt.Errorf("publish appstore: resolve app: %w", err)
-				}
-
-				if localBuildMode {
-					buildNumberValue, err = resolvePublishBuildNumber(preflightCtx, client, resolvedPublishAppID, versionValue, normalizedPlatform, localBuild, buildNumberValue)
-					if err != nil {
-						return fmt.Errorf("publish appstore: %w", err)
-					}
-					localBuildConfig, err = resolveLocalBuildConfig(localBuild, normalizedPlatform, versionValue, buildNumberValue)
-					if err != nil {
-						return fmt.Errorf("publish appstore: %w", err)
-					}
-					mode = asc.PublishModeLocalBuild
 				}
 			}
 
 			if *dryRun {
-				result := plannedAppStorePublishResult(mode, versionValue, buildNumberValue, *wait, *submit, metadataDirValue != "", localBuildMode, localBuildConfig)
+				result := plannedAppStorePublishResult(mode, versionValue, buildNumberValue, *wait, *submit, metadataDirValue != "")
 				return shared.PrintOutput(result, *output.Output, *output.Pretty)
 			}
 
 			var buildResp *asc.BuildResponse
-			uploaded := false
-			var localBuildResult *publishLocalBuildExecutionResult
-			if localBuildMode {
-				localBuildResult, err = runPublishLocalBuild(ctx, client, resolvedPublishAppID, normalizedPlatform, versionValue, buildNumberValue, *pollInterval, timeoutValue, timeoutOverride, localBuildConfig)
-				if err != nil {
-					return fmt.Errorf("publish appstore: %w", err)
-				}
-				buildResp = localBuildResult.Build
-				versionValue = localBuildResult.Version
-				buildNumberValue = localBuildResult.BuildNumber
-				uploaded = localBuildResult.Uploaded
-			} else {
-				uploadResult, err := uploadBuildAndWaitForIDFn(requestCtx, client, resolvedPublishAppID, ipaValue, fileInfo, versionValue, buildNumberValue, platformValue, *pollInterval, timeoutValue, timeoutOverride)
-				if err != nil {
-					return fmt.Errorf("publish appstore: %w", err)
-				}
-				buildResp = uploadResult.Build
-				versionValue = uploadResult.Version
-				buildNumberValue = uploadResult.BuildNumber
-				uploaded = true
+			uploadResult, err := uploadBuildAndWaitForIDFn(requestCtx, client, resolvedPublishAppID, ipaValue, fileInfo, versionValue, buildNumberValue, platformValue, *pollInterval, timeoutValue, timeoutOverride)
+			if err != nil {
+				return fmt.Errorf("publish appstore: %w", err)
 			}
+			buildResp = uploadResult.Build
+			versionValue = uploadResult.Version
+			buildNumberValue = uploadResult.BuildNumber
 
 			if *wait {
 				cancel()
@@ -636,27 +522,9 @@ Examples:
 				BuildNumber:  resolvedBuildNumberValue,
 				BuildID:      buildResp.Data.ID,
 				VersionID:    versionResp.Data.ID,
-				Uploaded:     uploaded,
+				Uploaded:     true,
 				Attached:     false,
 				Submitted:    false,
-			}
-
-			attachLocalPublishResult := func() {
-				if localBuildResult == nil {
-					return
-				}
-				result.Archive = localBuildResult.Archive
-				result.Export = localBuildResult.Export
-				result.Publish = &asc.AppStorePublishStageResult{
-					BuildVersion: result.BuildVersion,
-					BuildNumber:  result.BuildNumber,
-					BuildID:      result.BuildID,
-					VersionID:    result.VersionID,
-					SubmissionID: result.SubmissionID,
-					Uploaded:     result.Uploaded,
-					Attached:     result.Attached,
-					Submitted:    result.Submitted,
-				}
 			}
 
 			cancel()
@@ -683,7 +551,6 @@ Examples:
 				if existingSubmissionID != "" {
 					result.SubmissionID = existingSubmissionID
 					result.Submitted = true
-					attachLocalPublishResult()
 					return shared.PrintOutput(result, *output.Output, *output.Pretty)
 				}
 			}
@@ -758,15 +625,13 @@ Examples:
 				result.SubmissionID = submitResult.SubmissionID
 				result.Submitted = submitResult.SubmissionID != ""
 			}
-			attachLocalPublishResult()
-
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-func plannedAppStorePublishResult(mode asc.PublishMode, version, buildNumber string, wait, submit, applyMetadata, localBuildMode bool, localBuildConfig publishLocalBuildConfig) *asc.AppStorePublishResult {
-	result := &asc.AppStorePublishResult{
+func plannedAppStorePublishResult(mode asc.PublishMode, version, buildNumber string, wait, submit, applyMetadata bool) *asc.AppStorePublishResult {
+	return &asc.AppStorePublishResult{
 		Mode:         mode,
 		DryRun:       true,
 		BuildVersion: version,
@@ -774,43 +639,12 @@ func plannedAppStorePublishResult(mode asc.PublishMode, version, buildNumber str
 		Uploaded:     false,
 		Attached:     false,
 		Submitted:    false,
-		Plan:         plannedAppStorePublishSteps(localBuildMode, wait, submit, applyMetadata),
+		Plan:         plannedAppStorePublishSteps(wait, submit, applyMetadata),
 	}
-
-	if !localBuildMode {
-		return result
-	}
-
-	result.Archive = &asc.PublishArchiveStageResult{
-		ArchivePath:   localBuildConfig.ArchivePath,
-		Version:       version,
-		BuildNumber:   buildNumber,
-		Scheme:        localBuildConfig.Scheme,
-		Configuration: localBuildConfig.Configuration,
-	}
-	result.Export = &asc.PublishExportStageResult{
-		ArchivePath:       localBuildConfig.ArchivePath,
-		IPAPath:           localBuildConfig.IPAPath,
-		Version:           version,
-		BuildNumber:       buildNumber,
-		ExportOptionsPath: localBuildConfig.ExportOptionsPath,
-		DirectUpload:      false,
-	}
-
-	return result
 }
 
-func plannedAppStorePublishSteps(localBuildMode, wait, submit, applyMetadata bool) []asc.PublishPlanStep {
-	steps := make([]asc.PublishPlanStep, 0, 8)
-	if localBuildMode {
-		steps = append(
-			steps,
-			newPublishPlanStep(publishPlanStepArchiveLocalBuild, "Archive the selected Xcode workspace or project to a local .xcarchive."),
-			newPublishPlanStep(publishPlanStepExportLocalBuild, "Export the archive to a local App Store IPA artifact."),
-		)
-	}
-
-	steps = append(steps, newPublishPlanStep(publishPlanStepUploadBuild, "Upload the IPA to App Store Connect and wait for the build record to appear."))
+func plannedAppStorePublishSteps(wait, submit, applyMetadata bool) []asc.PublishPlanStep {
+	steps := []asc.PublishPlanStep{newPublishPlanStep(publishPlanStepUploadBuild, "Upload the IPA to App Store Connect and wait for the build record to appear.")}
 	if wait {
 		steps = append(steps, newPublishPlanStep(publishPlanStepWaitForBuildProcessing, "Wait for App Store Connect build processing to reach a terminal state."))
 	}
@@ -826,14 +660,17 @@ func plannedAppStorePublishSteps(localBuildMode, wait, submit, applyMetadata boo
 	return steps
 }
 
-func canPlanAppStorePublishWithoutASC(appID string, localBuildMode bool, buildNumber string) bool {
-	if !shared.IsNumericAppID(strings.TrimSpace(appID)) {
-		return false
+func canPlanAppStorePublishWithoutASC(appID string) bool {
+	return shared.IsNumericAppID(strings.TrimSpace(appID))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
-	if !localBuildMode {
-		return true
-	}
-	return strings.TrimSpace(buildNumber) != ""
+	return ""
 }
 
 func isPublishBuildProcessed(buildResp *asc.BuildResponse) bool {

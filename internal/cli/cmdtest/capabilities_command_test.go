@@ -50,19 +50,18 @@ func TestRun_CapabilitiesJSONReportsKnownGaps(t *testing.T) {
 	if resp.Summary.SchemaEndpointCount == 0 {
 		t.Fatalf("expected embedded schema endpoint count to be populated")
 	}
-	for _, status := range []string{"cli-supported", "web-session", "not-public-api"} {
+	for _, status := range []string{"cli-supported", "not-public-api"} {
 		if resp.Summary.Statuses[status] == 0 {
 			t.Fatalf("expected status %q to be represented in summary: %+v", status, resp.Summary.Statuses)
 		}
 	}
 
 	assertCapability(t, resp, "App Store release submission", "cli-supported", "asc publish appstore --submit")
-	assertCapability(t, resp, "App creation", "web-session", "asc web apps create")
+	assertCapability(t, resp, "App creation", "not-public-api", "")
 	assertCapability(t, resp, "Initial app availability bootstrap", "partial", "asc pricing availability create")
-	assertCapability(t, resp, "Initial app availability bootstrap", "partial", "asc web apps availability create")
 	assertCapability(t, resp, "Metadata and localization sync", "cli-supported", "asc metadata init")
 	assertCapability(t, resp, "Metadata and localization sync", "cli-supported", "asc metadata validate")
-	assertCapability(t, resp, "App privacy data-use declarations", "web-session", "asc web privacy")
+	assertCapability(t, resp, "App privacy data-use declarations", "not-public-api", "")
 	assertCapability(t, resp, "Transaction tax reports", "not-public-api", "")
 	assertCapability(t, resp, "Subscriptions and in-app purchases", "cli-supported", "asc review items add")
 	assertMonetizationVersionWorkflow(t, resp)

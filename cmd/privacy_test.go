@@ -21,6 +21,8 @@ func TestCommandCatalogExcludesNonAppStoreConnectSubsystems(t *testing.T) {
 		"snitch":            true,
 		"storekit":          true,
 		"telemetry":         true,
+		"web":               true,
+		"xcode":             true,
 	}
 	for _, command := range registry.NewCatalog("test").MetadataCommands() {
 		if banned[command.Name] {
@@ -40,10 +42,17 @@ func TestRepositoryExcludesRemovedSurfacesAndVendorResidues(t *testing.T) {
 		filepath.Join(repoRoot, ".github", "workflows", "integration.yml"),
 		filepath.Join(repoRoot, "internal", "itunes"),
 		filepath.Join(repoRoot, "internal", "screenshots"),
+		filepath.Join(repoRoot, "internal", "web"),
+		filepath.Join(repoRoot, "internal", "xcode"),
 		filepath.Join(repoRoot, "internal", "cli", "initcmd"),
 		filepath.Join(repoRoot, "internal", "cli", "migrate"),
 		filepath.Join(repoRoot, "internal", "cli", "notari"+"zation"),
 		filepath.Join(repoRoot, "internal", "cli", "shots"),
+		filepath.Join(repoRoot, "internal", "cli", "web"),
+		filepath.Join(repoRoot, "internal", "cli", "xcode"),
+		filepath.Join(repoRoot, "commands", "web.mdx"),
+		filepath.Join(repoRoot, "docs", "design", "xcode-export-options-generation.md"),
+		filepath.Join(repoRoot, "docs", "design", "xcode-version-structured-editor.md"),
 		filepath.Join(repoRoot, "internal", "cli", "webhooks", "webhooks_serve.go"),
 		filepath.Join(repoRoot, "internal", "cli", "assets", "assets_screenshots_review_plan.go"),
 	} {
@@ -199,6 +208,7 @@ func TestRepositoryHasNoNativeCredentialStoreCode(t *testing.T) {
 		"Sec" + "Keychain",
 		"Keychain" + "Backend",
 		"sessionBackend" + "Keychain",
+		"native credential " + "store",
 		`exec.Command("` + "security" + `"`,
 	}
 	err := filepath.WalkDir("..", func(path string, entry os.DirEntry, walkErr error) error {
@@ -211,7 +221,7 @@ func TestRepositoryHasNoNativeCredentialStoreCode(t *testing.T) {
 			}
 			return nil
 		}
-		if filepath.Base(path) == "privacy_test.go" {
+		if filepath.Base(path) == "privacy_test.go" || filepath.Base(path) == "build-file-only-darwin.sh" {
 			return nil
 		}
 		data, err := os.ReadFile(path)

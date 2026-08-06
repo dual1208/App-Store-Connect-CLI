@@ -193,7 +193,7 @@ func TestPricingAvailabilityCreate_RelationshipRejectionExplainsFallback(t *test
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
 
-	want := "pricing availability create: Apple rejected the initial availability request through the public API; availability was not configured. Authenticate a web session with \"asc web auth login --apple-id EMAIL\", then retry with \"asc web apps availability create\", or configure Pricing and Availability in App Store Connect: The provided entity includes a relationship with an invalid value: The relationship 'territoryAvailabilities.territory' expects an included resource with type 'territories' and id 'TTO' but no matching resource was included."
+	want := "pricing availability create: Apple rejected the initial availability request through the public API; availability was not configured. Configure Pricing and Availability in App Store Connect: The provided entity includes a relationship with an invalid value: The relationship 'territoryAvailabilities.territory' expects an included resource with type 'territories' and id 'TTO' but no matching resource was included."
 	if runErr.Error() != want {
 		t.Fatalf("unexpected error:\n got: %q\nwant: %q", runErr.Error(), want)
 	}

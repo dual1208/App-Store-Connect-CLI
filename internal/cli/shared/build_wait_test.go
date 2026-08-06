@@ -2,12 +2,10 @@ package shared
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -516,136 +514,5 @@ func TestVerifyBuildUploadAfterCommitIgnoresRetryableLookupErrorsUntilBuildLinks
 	}
 	if lookupCalls < 2 {
 		t.Fatalf("expected retryable lookup error to be retried, got %d lookup(s)", lookupCalls)
-	}
-}
-
-func TestResolveBuildStatusBundleIDReturnsAppBundleIDWhenSupported(t *testing.T) {
-	previous := buildStatusBundleIDSupportedFn
-	buildStatusBundleIDSupportedFn = func(context.Context) bool { return true }
-	t.Cleanup(func() {
-		buildStatusBundleIDSupportedFn = previous
-	})
-
-	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet {
-			return nil, fmt.Errorf("expected GET, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/apps/app-1" {
-			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
-		}
-		return buildWaitJSONResponse(`{
-			"data": {
-				"type": "apps",
-				"id": "app-1",
-				"attributes": {
-					"name": "Demo",
-					"bundleId": "com.example.demo",
-					"sku": "demo"
-				}
-			}
-		}`)
-	})
-
-	bundleID := resolveBuildStatusBundleID(context.Background(), client, "app-1")
-	if bundleID != "com.example.demo" {
-		t.Fatalf("expected resolved bundle ID com.example.demo, got %q", bundleID)
-	}
-}
-
-func TestBuildStatusPrivateKeyPathFallsBackToStoredPEMWhenPathMissing(t *testing.T) {
-	tempDir := t.TempDir()
-	keyPath := filepath.Join(tempDir, "AuthKey.p8")
-	writeECDSAPEM(t, keyPath)
-
-	keyData, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-
-	CleanupTempPrivateKeys()
-	t.Cleanup(CleanupTempPrivateKeys)
-
-	resolvedPath, err := buildStatusPrivateKeyPath(ResolvedAuthCredentials{
-		KeyPath: filepath.Join(tempDir, "missing.p8"),
-		KeyPEM:  string(keyData),
-	})
-	if err != nil {
-		t.Fatalf("buildStatusPrivateKeyPath() error: %v", err)
-	}
-	if resolvedPath == filepath.Join(tempDir, "missing.p8") {
-		t.Fatalf("expected fallback temp path, got missing configured path %q", resolvedPath)
-	}
-	if _, err := os.Stat(resolvedPath); err != nil {
-		t.Fatalf("Stat(%q) error: %v", resolvedPath, err)
-	}
-	if _, err := asc.NewClient("KEY123", "ISS456", resolvedPath); err != nil {
-		t.Fatalf("expected fallback private key path to be usable, got %v", err)
-	}
-}
-
-func TestBuildStatusPrivateKeyPathPrefersStoredPEMOverExistingKeyPath(t *testing.T) {
-	tempDir := t.TempDir()
-	keyPath := filepath.Join(tempDir, "AuthKey-stale.p8")
-	if err := os.WriteFile(keyPath, []byte("stale-key"), 0o600); err != nil {
-		t.Fatalf("WriteFile() error: %v", err)
-	}
-
-	validKeyPath := filepath.Join(tempDir, "AuthKey-valid.p8")
-	writeECDSAPEM(t, validKeyPath)
-
-	keyData, err := os.ReadFile(validKeyPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-
-	CleanupTempPrivateKeys()
-	t.Cleanup(CleanupTempPrivateKeys)
-
-	resolvedPath, err := buildStatusPrivateKeyPath(ResolvedAuthCredentials{
-		KeyPath: keyPath,
-		KeyPEM:  string(keyData),
-	})
-	if err != nil {
-		t.Fatalf("buildStatusPrivateKeyPath() error: %v", err)
-	}
-	if resolvedPath == keyPath {
-		t.Fatalf("expected PEM-backed temp path instead of configured key path %q", resolvedPath)
-	}
-	if _, err := asc.NewClient("KEY123", "ISS456", resolvedPath); err != nil {
-		t.Fatalf("expected PEM-backed fallback path to be usable, got %v", err)
-	}
-}
-
-func TestBuildStatusPrivateKeyPathDecodesStoredBase64PEM(t *testing.T) {
-	tempDir := t.TempDir()
-	keyPath := filepath.Join(tempDir, "AuthKey-valid.p8")
-	writeECDSAPEM(t, keyPath)
-
-	keyData, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-
-	CleanupTempPrivateKeys()
-	t.Cleanup(CleanupTempPrivateKeys)
-
-	resolvedPath, err := buildStatusPrivateKeyPath(ResolvedAuthCredentials{
-		KeyPEM: base64.StdEncoding.EncodeToString(keyData),
-	})
-	if err != nil {
-		t.Fatalf("buildStatusPrivateKeyPath() error: %v", err)
-	}
-	if resolvedPath == "" {
-		t.Fatal("expected decoded temp key path, got empty path")
-	}
-	resolvedData, err := os.ReadFile(resolvedPath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q) error: %v", resolvedPath, err)
-	}
-	if string(resolvedData) != string(keyData) {
-		t.Fatalf("expected decoded PEM data, got %q", string(resolvedData))
-	}
-	if _, err := asc.NewClient("KEY123", "ISS456", resolvedPath); err != nil {
-		t.Fatalf("expected base64-decoded private key path to be usable, got %v", err)
 	}
 }

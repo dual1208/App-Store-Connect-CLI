@@ -22,10 +22,6 @@ var rootUsageGroups = []rootCommandGroup{
 		commands: []string{"auth", "doctor", "docs"},
 	},
 	{
-		title:    "WEB SESSION COMMANDS",
-		commands: []string{"web"},
-	},
-	{
 		title:    "ANALYTICS & FINANCE COMMANDS",
 		commands: []string{"analytics", "insights", "finance", "performance"},
 	},
@@ -44,7 +40,7 @@ var rootUsageGroups = []rootCommandGroup{
 		title: "TESTFLIGHT & BUILD COMMANDS",
 		commands: []string{
 			"testflight", "feedback", "crashes", "builds", "build-bundles",
-			"build-localizations", "xcode",
+			"build-localizations",
 			"sandbox",
 		},
 	},

@@ -67,10 +67,8 @@ import (
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/validate"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/versions"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/videopreviews"
-	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/web"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/webhooks"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/workflow"
-	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/xcode"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/xcodecloud"
 )
 
@@ -105,7 +103,6 @@ func NewCatalog(version string) *Catalog {
 	catalog.factories = []factory{
 		commandFactory("auth", "Manage authentication for the App Store Connect API.", auth.AuthCommand),
 		commandFactory("doctor", "Diagnose authentication configuration issues.", auth.AuthDoctorCommand),
-		commandFactory("web", "Apple web-session workflows.", web.WebCommand),
 		commandFactory("account", "Inspect account-level health and access signals.", account.AccountCommand),
 		commandFactory("docs", "Access embedded App Store Connect documentation guides.", docs.DocsCommand),
 		commandFactory("diff", "Generate deterministic non-mutating diff plans.", diffcmd.DiffCommand),
@@ -140,7 +137,6 @@ func NewCatalog(version string) *Catalog {
 		commandFactory("publish", "High-level publish workflows for TestFlight and App Store.", publish.PublishCommand),
 		commandFactory("release", "Run high-level App Store release workflows.", release.ReleaseCommand),
 		commandFactory("workflow", "Run multi-step automation workflows.", workflow.WorkflowCommand),
-		commandFactory("xcode", "Local Xcode archive/export helpers (macOS only).", xcode.XcodeCommand),
 		commandFactory("versions", "Manage App Store versions.", versions.VersionsCommand),
 		commandFactory("product-pages", "Manage custom product pages and product page experiments.", productpages.ProductPagesCommand),
 		commandFactory("routing-coverage", "Manage routing app coverage files.", routingcoverage.RoutingCoverageCommand),
@@ -167,7 +163,7 @@ func NewCatalog(version string) *Catalog {
 		commandFactory("accessibility", "Manage accessibility declarations.", accessibility.AccessibilityCommand),
 		commandFactory("encryption", "Manage app encryption declarations and documents.", encryption.EncryptionCommand),
 		commandFactory("game-center", "Manage Game Center resources in App Store Connect.", gamecenter.GameCenterCommand),
-		commandFactory("capabilities", "Show CLI, API, web-only, and public-API-limited capability coverage.", capabilities.Command),
+		commandFactory("capabilities", "Show CLI, API, and public-API-limited capability coverage.", capabilities.Command),
 		commandFactory("schema", "Inspect App Store Connect API endpoint schemas at runtime.", schema.SchemaCommand),
 		commandFactory("search", "Search asc commands and examples.", func() *ffcli.Command {
 			return searchcmd.SearchCommand(catalog.All)

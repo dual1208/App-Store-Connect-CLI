@@ -7,7 +7,6 @@ import (
 
 	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
 	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
-	webcore "github.com/dual1208/App-Store-Connect-CLI/internal/web"
 )
 
 // Exit codes following the CI/CD specification.
@@ -47,8 +46,7 @@ func ExitCodeFromError(err error) int {
 	// Well-known error types
 	if errors.Is(err, shared.ErrMissingAuth) ||
 		errors.Is(err, asc.ErrUnauthorized) ||
-		errors.Is(err, asc.ErrForbidden) ||
-		errors.Is(err, webcore.ErrInvalidAppleAccountCredentials) {
+		errors.Is(err, asc.ErrForbidden) {
 		return ExitAuth
 	}
 	if errors.Is(err, asc.ErrNotFound) {
@@ -67,10 +65,6 @@ func ExitCodeFromError(err error) int {
 		// Fall back to API error code mapping
 		return APIErrorCodeToExitCode(apiErr.Code)
 	}
-	if webErr, ok := errors.AsType[*webcore.APIError](err); ok {
-		return HTTPStatusToExitCode(webErr.HTTPStatusCode())
-	}
-
 	// Generic error
 	return ExitError
 }

@@ -43,7 +43,6 @@ func AppsCommand() *ffcli.Command {
 Examples:
   asc apps
   asc apps list --bundle-id "com.example.app"
-  asc web apps create --name "My App" --bundle-id "com.example.app" --sku "MYAPP123"
   asc apps registry pull --path ".asc/app-registry.json"
   asc apps view --id "APP_ID"
   asc apps info view --app "APP_ID"
@@ -78,7 +77,7 @@ Examples:
 			if len(args) > 0 {
 				subcommand := strings.TrimSpace(args[0])
 				if subcommand == "create" {
-					fmt.Fprintln(os.Stderr, "Error: `asc apps create` was removed. Use `asc web apps create` instead.")
+					fmt.Fprintln(os.Stderr, "Error: Apple does not expose app-record creation through the public API. Use App Store Connect in a browser.")
 					return flag.ErrHelp
 				}
 				fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q\n", subcommand)

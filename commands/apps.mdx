@@ -6,9 +6,9 @@
 
 The `apps` command is the main app-management surface for App Store Connect.
 
-App creation no longer lives under `asc apps` in 1.0. Use `asc web apps create`
-for the web-session creation flow, and see the
-[Migrate to 1.0](/migrate-to-1-0) guide if you are updating older scripts.
+Apple does not expose app-record creation through the public App Store Connect
+API. Create the app record in App Store Connect, then use `asc apps` for the
+public API lifecycle.
 
 ## Commands
 
@@ -275,12 +275,6 @@ surface before scripting against a specific app workflow.
 
 ```bash  theme={null}
 asc apps list --bundle-id "com.example.app" --output table
-```
-
-### Create an app with the web flow
-
-```bash  theme={null}
-asc web apps create --name "My App" --bundle-id "com.example.myapp" --sku "MYAPP123" --apple-id "user@example.com"
 ```
 
 ### View app details

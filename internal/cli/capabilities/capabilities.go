@@ -19,7 +19,6 @@ const (
 	statusCLISupported = "cli-supported"
 	statusPartial      = "partial"
 	statusClientOnly   = "client-only"
-	statusWebSession   = "web-session"
 	statusNotPublicAPI = "not-public-api"
 )
 
@@ -27,7 +26,6 @@ var allowedCapabilityStatuses = []string{
 	statusCLISupported,
 	statusPartial,
 	statusClientOnly,
-	statusWebSession,
 	statusNotPublicAPI,
 }
 
@@ -65,19 +63,19 @@ type capabilityFilter struct {
 // Command returns the capabilities command.
 func Command() *ffcli.Command {
 	fs := flag.NewFlagSet("capabilities", flag.ExitOnError)
-	status := fs.String("status", "", "Filter by status: cli-supported, partial, client-only, web-session, not-public-api")
+	status := fs.String("status", "", "Filter by status: cli-supported, partial, client-only, not-public-api")
 	area := fs.String("area", "", "Filter by area (comma-separated, e.g. release,monetization)")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "capabilities",
 		ShortUsage: "asc capabilities [flags]",
-		ShortHelp:  "Show CLI, API, web-only, and public-API-limited capability coverage.",
-		LongHelp: `Show CLI, API, web-only, and public-API-limited capability coverage.
+		ShortHelp:  "Show CLI, API, and public-API-limited capability coverage.",
+		LongHelp: `Show CLI, API, and public-API-limited capability coverage.
 
 This command answers whether high-value App Store Connect workflows are first-class
-CLI commands, partially covered, available only through internal client code, routed
-through web-session commands, or blocked by Apple's public API.
+CLI commands, partially covered, available only through internal client code, or
+blocked by Apple's public API.
 
 Examples:
   asc capabilities
@@ -191,7 +189,7 @@ func buildReport(filter capabilityFilter) (Report, error) {
 		Sources: []string{
 			"registered CLI command surface",
 			"embedded App Store Connect OpenAPI schema index",
-			"curated public-API limitations and web-session surfaces",
+			"curated public-API limitations",
 		},
 	}, nil
 }
@@ -265,20 +263,19 @@ func capabilityRows() []Capability {
 		{
 			Area:         "app-management",
 			Capability:   "App creation",
-			Status:       statusWebSession,
-			Commands:     []string{"asc web apps create"},
+			Status:       statusNotPublicAPI,
 			APIResources: []string{"apps"},
 			Notes:        []string{"The public apps API manages existing apps; creating app records is not exposed as a public REST operation."},
-			NextAction:   "Use App Store Connect web UI, or asc web apps create.",
+			NextAction:   "Use App Store Connect in a browser.",
 		},
 		{
 			Area:         "app-management",
 			Capability:   "Initial app availability bootstrap",
 			Status:       statusPartial,
-			Commands:     []string{"asc pricing availability create", "asc web apps availability create"},
+			Commands:     []string{"asc pricing availability create"},
 			APIResources: []string{"POST /v2/appAvailabilities", "territoryAvailabilities"},
-			Notes:        []string{"The public command sends Apple's documented inline territory payload, but Apple can reject the bootstrap request. The web command requires an authenticated Apple web session."},
-			NextAction:   "If public bootstrap is rejected, run asc web auth login --apple-id EMAIL and use asc web apps availability create, or configure Pricing and Availability in App Store Connect.",
+			Notes:        []string{"The public command sends Apple's documented inline territory payload, but Apple can reject the bootstrap request."},
+			NextAction:   "If public bootstrap is rejected, configure Pricing and Availability in App Store Connect.",
 		},
 		{
 			Area:       "app-management",
@@ -291,7 +288,7 @@ func capabilityRows() []Capability {
 				"appPriceSchedules",
 				"appPricePoints",
 			},
-			Notes: []string{"Existing availability records can be viewed and edited through the public App Store Connect API; initial bootstrap can require an authenticated web session or App Store Connect."},
+			Notes: []string{"Existing availability records can be viewed and edited through the public App Store Connect API; initial bootstrap may require App Store Connect in a browser."},
 		},
 		{
 			Area:       "metadata",
@@ -331,10 +328,9 @@ func capabilityRows() []Capability {
 		{
 			Area:       "privacy",
 			Capability: "App privacy data-use declarations",
-			Status:     statusWebSession,
-			Commands:   []string{"asc web privacy"},
+			Status:     statusNotPublicAPI,
 			Notes:      []string{"App privacy data-use resources are not present in the embedded public OpenAPI snapshot."},
-			NextAction: "Use App Store Connect web UI, or asc web privacy.",
+			NextAction: "Use App Store Connect in a browser.",
 		},
 		{
 			Area:       "monetization",
@@ -388,12 +384,12 @@ func capabilityRows() []Capability {
 			Area:       "testflight",
 			Capability: "Sandbox tester lifecycle",
 			Status:     statusPartial,
-			Commands:   []string{"asc sandbox", "asc web sandbox create"},
+			Commands:   []string{"asc sandbox"},
 			APIResources: []string{
 				"sandboxTesters",
 				"sandboxTestersClearPurchaseHistoryRequest",
 			},
-			Notes: []string{"Public API support varies by operation and account; web-session creation exists as a fallback."},
+			Notes: []string{"Public API support varies by operation and account."},
 		},
 		{
 			Area:       "analytics",
@@ -477,10 +473,10 @@ func capabilityRows() []Capability {
 		},
 		{
 			Area:       "review",
-			Capability: "Web-only review rejection inspection",
-			Status:     statusWebSession,
-			Commands:   []string{"asc web review"},
-			Notes:      []string{"Some reviewer-message and rejection-detail surfaces are richer in App Store Connect web-session flows than in public API responses."},
+			Capability: "Review rejection inspection",
+			Status:     statusNotPublicAPI,
+			Notes:      []string{"Some reviewer-message and rejection-detail surfaces are richer in App Store Connect than in public API responses."},
+			NextAction: "Use App Store Connect in a browser.",
 		},
 	}
 }

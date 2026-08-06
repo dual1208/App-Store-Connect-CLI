@@ -40,10 +40,6 @@ asc <subcommand> [flags]
 - `doctor` - Diagnose authentication configuration issues.
 - `docs` - Access embedded App Store Connect documentation guides.
 
-### Web Session Commands
-
-- `web` - Apple web-session workflows.
-
 ### Analytics and Finance
 
 - `analytics` - Request and download analytics and sales reports.
@@ -85,7 +81,6 @@ asc <subcommand> [flags]
 - `builds` - Manage builds in App Store Connect.
 - `build-bundles` - Manage build bundles and App Clip data.
 - `build-localizations` - Manage build release notes localizations.
-- `xcode` - Local Xcode archive/export helpers (macOS only).
 - `sandbox` - Manage sandbox testers in App Store Connect.
 
 ### Review and Release
@@ -130,7 +125,7 @@ asc <subcommand> [flags]
 ### Utility
 
 - `diff` - Generate deterministic non-mutating diff plans.
-- `capabilities` - Show CLI, API, web-only, and public-API-limited capability coverage.
+- `capabilities` - Show CLI, API, and public-API-limited capability coverage.
 - `search` - Search asc commands and examples.
 - `version` - Print version information and exit.
 - `completion` - Print shell completion scripts.
@@ -151,15 +146,8 @@ asc <subcommand> [flags]
 # List apps
 asc apps list --output table
 
-# Manage App Store compatibility opt-ins through a web session
-asc web apps compatibility view --app "123456789"
-asc web apps compatibility edit --app "123456789" --ios-app-on-mac=false --ios-app-on-vision-pro=false
-
 # Upload a build
 asc builds upload --app "123456789" --ipa "/path/to/MyApp.ipa"
-
-# Generate local Xcode metadata before archiving
-asc xcode inject --manifest .asc/deployment.json --set version=1.2.3 --set build_number=42 --dry-run --output json
 
 # Stage an App Store version before submission
 asc release stage --app "123456789" --version "1.2.3" --build "BUILD_ID" --copy-metadata-from "1.2.2" --dry-run

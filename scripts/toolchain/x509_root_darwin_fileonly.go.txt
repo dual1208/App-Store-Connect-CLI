@@ -1,0 +1,98 @@
+// Copyright 2026.
+// File-only replacement for Go's Darwin crypto/x509 platform verifier.
+
+package x509
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"syscall"
+)
+
+var errFileOnlyPlatformVerifier = errors.New("platform certificate verifier disabled in file-only build")
+
+const fileOnlyRootBundlePath = "/etc/ssl/cert.pem"
+
+func (c *Certificate) systemVerify(opts *VerifyOptions) (chains [][]*Certificate, err error) {
+	return nil, errFileOnlyPlatformVerifier
+}
+
+func loadSystemRoots() (*CertPool, error) {
+	return loadFileOnlyRoots(fileOnlyRootBundlePath)
+}
+
+func loadFileOnlyRoots(rootPath string) (*CertPool, error) {
+	pathInfo, err := os.Lstat(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect root certificate bundle: %w", err)
+	}
+	if err := validateFileOnlyRootMetadata(rootPath, pathInfo); err != nil {
+		return nil, err
+	}
+
+	rootFD, err := syscall.Open(rootPath, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open root certificate bundle: %w", err)
+	}
+	rootFile := os.NewFile(uintptr(rootFD), rootPath)
+	if rootFile == nil {
+		syscall.Close(rootFD)
+		return nil, fmt.Errorf("open root certificate bundle: invalid file descriptor")
+	}
+	defer rootFile.Close()
+
+	openInfo, err := rootFile.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat open root certificate bundle: %w", err)
+	}
+	if !os.SameFile(pathInfo, openInfo) {
+		return nil, fmt.Errorf("root certificate bundle changed while opening: %s", rootPath)
+	}
+	if err := validateFileOnlyRootMetadata(rootPath, openInfo); err != nil {
+		return nil, err
+	}
+
+	const maxRootBundleSize = 16 << 20
+	data, err := io.ReadAll(io.LimitReader(rootFile, maxRootBundleSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read root certificate bundle: %w", err)
+	}
+	if len(data) > maxRootBundleSize {
+		return nil, fmt.Errorf("root certificate bundle exceeds %d bytes: %s", maxRootBundleSize, rootPath)
+	}
+	afterReadInfo, err := rootFile.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("restat root certificate bundle: %w", err)
+	}
+	if err := validateFileOnlyRootMetadata(rootPath, afterReadInfo); err != nil {
+		return nil, err
+	}
+	if !os.SameFile(openInfo, afterReadInfo) ||
+		openInfo.Size() != afterReadInfo.Size() ||
+		openInfo.Mode() != afterReadInfo.Mode() ||
+		!openInfo.ModTime().Equal(afterReadInfo.ModTime()) {
+		return nil, fmt.Errorf("root certificate bundle changed while reading: %s", rootPath)
+	}
+
+	roots := NewCertPool()
+	if !roots.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("root certificate bundle contains no valid certificates: %s", rootPath)
+	}
+	return roots, nil
+}
+
+func validateFileOnlyRootMetadata(rootPath string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("root certificate bundle must be a regular non-symlink file: %s", rootPath)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 {
+		return fmt.Errorf("root certificate bundle must be owned by root: %s", rootPath)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("root certificate bundle must not be group/world writable: %s", rootPath)
+	}
+	return nil
+}

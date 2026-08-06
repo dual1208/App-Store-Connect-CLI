@@ -179,7 +179,7 @@ func TestRun_RemovedCommandsPreserveMigrationGuidance(t *testing.T) {
 		args       []string
 		wantStderr string
 	}{
-		{name: "apps create", args: []string{"apps", "create"}, wantStderr: "Use `asc web apps create` instead."},
+		{name: "apps create", args: []string{"apps", "create"}, wantStderr: "Use App Store Connect in a browser."},
 		{name: "submit create", args: []string{"submit", "create"}, wantStderr: "Use `asc review submit`"},
 		{name: "submit preflight", args: []string{"submit", "preflight"}, wantStderr: "Use `asc validate` instead."},
 	}
@@ -312,30 +312,6 @@ func TestRun_RemovedTopLevelCommandsReturnUnknown(t *testing.T) {
 				t.Fatalf("expected unknown command in stderr, got %q", stderr)
 			}
 		})
-	}
-}
-
-func TestRun_WebBundleIDSyncAppClipInvalidSettingsJSONReturnsUsage(t *testing.T) {
-	resetReportFlags(t)
-
-	_, stderr := captureCommandOutput(t, func() {
-		code := Run([]string{
-			"web", "bundle-ids", "capabilities", "sync-app-clip",
-			"--bundle-id", "clip-1",
-			"--parent-bundle-id", "parent-1",
-			"--capability", "PUSH_NOTIFICATIONS",
-			"--settings-json", "null",
-		}, "1.0.0")
-		if code != ExitUsage {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-		}
-	})
-
-	if !strings.Contains(stderr, "--settings-json must be a JSON array") {
-		t.Fatalf("expected settings-json usage error, got %q", stderr)
-	}
-	if strings.Contains(stderr, "--apple-id is required") {
-		t.Fatalf("expected settings-json validation before auth resolution, got %q", stderr)
 	}
 }
 

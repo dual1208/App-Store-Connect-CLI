@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
-	"github.com/dual1208/App-Store-Connect-CLI/internal/xcode"
 )
 
 // PublishDefaultPollInterval is the default polling interval for build discovery.
@@ -21,7 +19,6 @@ type buildUploadFailureDiagnosticsFunc func(context.Context, *asc.Client, string
 
 var (
 	buildUploadFailureDiagnosticsFn buildUploadFailureDiagnosticsFunc = diagnoseBuildUploadFailure
-	buildStatusBundleIDSupportedFn                                    = xcode.SupportsBuildStatusBundleID
 )
 
 // ContextWithTimeoutDuration creates a context with a specific timeout.
@@ -295,105 +292,10 @@ func enrichBuildUploadFailure(ctx context.Context, client *asc.Client, appID str
 }
 
 func diagnoseBuildUploadFailure(ctx context.Context, client *asc.Client, appID string, upload *asc.BuildUploadResponse) (string, error) {
-	if upload == nil {
-		return "", nil
-	}
-
-	appID = strings.TrimSpace(appID)
-	buildNumber := strings.TrimSpace(upload.Data.Attributes.CFBundleVersion)
-	if appID == "" || buildNumber == "" {
-		return "", nil
-	}
-
-	creds, err := ResolveAuthCredentials("")
-	if err != nil {
-		return "", err
-	}
-	keyPath, err := buildStatusPrivateKeyPath(creds)
-	if err != nil {
-		return "", err
-	}
-
-	bundleID := resolveBuildStatusBundleID(ctx, client, appID)
-	result, err := xcode.BuildStatus(ctx, xcode.BuildStatusOptions{
-		AppleID:            appID,
-		BundleID:           bundleID,
-		BundleVersion:      buildNumber,
-		BundleShortVersion: strings.TrimSpace(upload.Data.Attributes.CFBundleShortVersionString),
-		Platform:           string(upload.Data.Attributes.Platform),
-		APIKey:             strings.TrimSpace(creds.KeyID),
-		APIIssuer:          strings.TrimSpace(creds.IssuerID),
-		P8FilePath:         keyPath,
-	})
-	if err != nil {
-		return "", err
-	}
-	return joinDiagnosticDetails(result.ProcessingErrors), nil
-}
-
-func resolveBuildStatusBundleID(ctx context.Context, client *asc.Client, appID string) string {
-	if client == nil || !buildStatusBundleIDSupportedFn(ctx) {
-		return ""
-	}
-
-	appID = strings.TrimSpace(appID)
-	if appID == "" {
-		return ""
-	}
-
-	app, err := client.GetApp(ctx, appID)
-	if err != nil || app == nil {
-		return ""
-	}
-	return strings.TrimSpace(app.Data.Attributes.BundleID)
-}
-
-func buildStatusPrivateKeyPath(creds ResolvedAuthCredentials) (string, error) {
-	if pem := strings.TrimSpace(creds.KeyPEM); pem != "" {
-		if decoded, cacheKey, ok := decodeBuildStatusPrivateKeyPEMBase64(pem); ok {
-			if path := cachedTempPrivateKeyPath(cacheKey); path != "" {
-				return path, nil
-			}
-			return writeTempPrivateKey(decoded, cacheKey)
-		}
-		normalized := normalizePrivateKeyValue(pem)
-		cacheKey := tempPrivateKeyCacheKey("raw", normalized)
-		if path := cachedTempPrivateKeyPath(cacheKey); path != "" {
-			return path, nil
-		}
-		return writeTempPrivateKey([]byte(normalized), cacheKey)
-	}
-	if path := strings.TrimSpace(creds.KeyPath); path != "" {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			return path, nil
-		}
-	}
+	// App Store Connect already includes processing details in the build-upload
+	// response. Keep this hook for tests and future ASC-only enrichment, but do
+	// not invoke external build tooling or materialize credentials on disk.
 	return "", nil
-}
-
-func decodeBuildStatusPrivateKeyPEMBase64(value string) ([]byte, string, bool) {
-	compact := strings.Join(strings.Fields(value), "")
-	if compact == "" {
-		return nil, "", false
-	}
-	decoded, err := decodeBase64Secret(value)
-	if err != nil {
-		return nil, "", false
-	}
-	normalized := normalizePrivateKeyValue(string(decoded))
-	if !looksLikePrivateKeyPEM(normalized) {
-		return nil, "", false
-	}
-	return []byte(normalized), tempPrivateKeyCacheKey("b64", compact), true
-}
-
-func looksLikePrivateKeyPEM(value string) bool {
-	normalized := normalizePrivateKeyValue(value)
-	return strings.Contains(normalized, "BEGIN ") && strings.Contains(normalized, "PRIVATE KEY")
-}
-
-func joinDiagnosticDetails(values []string) string {
-	return strings.Join(xcode.UniqueDiagnosticDetails(values), "; ")
 }
 
 func shouldIgnoreBuildWaitLookupError(err error) bool {

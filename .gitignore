@@ -14,6 +14,7 @@
 *.dylib
 /asc
 /asc-debug
+/asc-file-only-*
 
 # Test binary, built with `go test -c`
 *.test

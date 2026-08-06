@@ -2,7 +2,7 @@
 
 `asc` is a scriptable Go CLI focused on App Store Connect: authentication,
 apps, bundle IDs, signing, builds and uploads, TestFlight, users, metadata,
-encryption declarations, Xcode helpers, and release workflows.
+encryption declarations, and release workflows.
 
 This is an independent, unofficial project and is not affiliated with or
 endorsed by Apple.
@@ -15,7 +15,7 @@ Build a reviewed full commit from source:
 git clone https://github.com/dual1208/App-Store-Connect-CLI.git
 cd App-Store-Connect-CLI
 git checkout "FULL_REVIEWED_COMMIT_SHA"
-go build -trimpath -o asc .
+ASC_GO_BINARY=/path/to/go1.26.5 scripts/build-file-only-darwin.sh ./asc
 install -m 0755 asc "$HOME/.local/bin/asc"
 ```
 
@@ -45,15 +45,13 @@ For unattended machines, provide `ASC_KEY_ID`, `ASC_ISSUER_ID`, and
 ```bash
 # Apps and bundle IDs
 asc apps list --output table
-asc web apps create --name "My App" --bundle-id "com.example.myapp" --sku "MYAPP"
 asc bundle-ids list --output table
 
 # Signing and capabilities
 asc signing setup --app "APP_ID"
 asc capabilities --help
 
-# Build and upload
-asc xcode archive --help
+# Upload an existing build artifact
 asc builds upload --app "APP_ID" --ipa "/path/to/MyApp.ipa"
 asc builds wait --app "APP_ID" --build "BUILD_ID"
 

@@ -111,41 +111,6 @@ func TestHelpHidesDeprecatedLegacyVerbs(t *testing.T) {
 	}
 }
 
-func TestHelpRetainsCanonicalCommandsThatMentionLegacyAliases(t *testing.T) {
-	subs := Subcommands("dev")
-
-	tests := []struct {
-		path        string
-		subcommands []string
-	}{
-		{
-			path:        "asc web auth",
-			subcommands: []string{"login", "status", "capabilities", "logout"},
-		},
-		{
-			path:        "asc web apps",
-			subcommands: []string{"create", "availability"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			cmd := findCommandByPath(subs, tt.path)
-			if cmd == nil {
-				t.Fatalf("expected command %q", tt.path)
-				return
-			}
-
-			usage := cmd.UsageFunc(cmd)
-			for _, want := range tt.subcommands {
-				if !usageListsSubcommand(usage, want) {
-					t.Fatalf("expected help for %q to contain %q, got %q", tt.path, want, usage)
-				}
-			}
-		})
-	}
-}
-
 func visibleLeafPaths(rootSubcommands []*ffcli.Command) []string {
 	paths := make([]string, 0)
 	for _, root := range rootSubcommands {

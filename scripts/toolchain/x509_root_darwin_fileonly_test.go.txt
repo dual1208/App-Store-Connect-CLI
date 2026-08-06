@@ -1,0 +1,37 @@
+package x509
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestFileOnlySystemRootsLoad(t *testing.T) {
+	roots, err := loadFileOnlyRoots(fileOnlyRootBundlePath)
+	if err != nil {
+		t.Fatalf("load trusted system root bundle: %v", err)
+	}
+	if roots == nil || len(roots.Subjects()) == 0 {
+		t.Fatal("trusted system root bundle produced an empty pool")
+	}
+}
+
+func TestFileOnlyRejectsUnsafeRootFile(t *testing.T) {
+	unsafePath := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.WriteFile(unsafePath, []byte("not a certificate"), 0o666); err != nil {
+		t.Fatalf("create unsafe root file: %v", err)
+	}
+	if _, err := loadFileOnlyRoots(unsafePath); err == nil {
+		t.Fatal("unsafe non-root-owned, writable root file was accepted")
+	}
+}
+
+func TestFileOnlyRejectsRootSymlink(t *testing.T) {
+	symlinkPath := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.Symlink(fileOnlyRootBundlePath, symlinkPath); err != nil {
+		t.Fatalf("create root bundle symlink: %v", err)
+	}
+	if _, err := loadFileOnlyRoots(symlinkPath); err == nil {
+		t.Fatal("root bundle symlink was accepted")
+	}
+}

@@ -49,7 +49,7 @@ Tips:
   Run-step outputs can be referenced later as ${steps.resolve_build.BUILD_ID}.
   Output-producing step names only need to stay unique across workflows that can execute together in the same run graph.
   For asc commands that declare outputs, usually pass --output json.
-  A proven local Xcode -> TestFlight shape is: asc builds next-build-number --app $APP_ID -> asc xcode archive -> asc xcode export -> asc publish testflight --group ... --wait.
+  For TestFlight automation, build the IPA separately, then use asc publish testflight --ipa ... --group ... --wait.
 
 Example workflow file (.asc/workflow.json):
 

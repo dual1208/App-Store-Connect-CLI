@@ -46,7 +46,7 @@ func Classify(err error) ClassifiedError {
 	if containsPrivacyError(err) {
 		return ClassifiedError{
 			Message: err.Error(),
-			Hint:    "App privacy declarations (data usages) are not available via the public API. Use `asc web privacy pull|plan|apply|publish` or complete App Privacy in the App Store Connect web UI: https://appstoreconnect.apple.com",
+			Hint:    "App privacy declarations (data usages) are not available via the public API. Complete App Privacy in the App Store Connect web UI: https://appstoreconnect.apple.com",
 		}
 	}
 

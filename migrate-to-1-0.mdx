@@ -17,7 +17,7 @@ updating automation. The CLI is the source of truth.
 
 ## Common migrations
 
-* Deprecated `asc apps create` -> `asc web apps create`
+* Removed `asc apps create` -> create the app record in App Store Connect
 * Deprecated `asc submit preflight` -> `asc validate`
 * Deprecated `asc submit create` -> `asc publish appstore --submit --confirm`
 * Deprecated `asc release run` -> `asc publish appstore --submit --confirm`
@@ -66,14 +66,8 @@ asc submit cancel --version-id "VERSION_ID" --confirm
 
 ## App creation migration
 
-App creation is now an explicit web-session workflow:
-
-```bash  theme={null}
-asc web apps create --name "My App" --bundle-id "com.example.app" --sku "MYAPP123" --apple-id "user@example.com"
-```
-
-This flow is unofficial and uses Apple web-session endpoints. It is separate
-from the API-key driven `apps` family on purpose.
+Apple does not expose app-record creation through the public API. Create the
+record in App Store Connect, then use the API-key-driven `apps` family.
 
 ## Updating `get` / `set` scripts
 
@@ -106,4 +100,3 @@ asc pricing availability edit --app "APP_ID" --territory "USA,GBR,IND" --availab
 * [Publish](/commands/publish)
 * [Release](/commands/release)
 * [Submit](/commands/submit)
-* [Web](/commands/web)
