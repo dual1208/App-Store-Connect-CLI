@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Start here / troubleshooting
+    url: https://github.com/dual1208/App-Store-Connect-CLI#quick-start
+    about: Install asc, authenticate, validate auth, and troubleshoot common output issues
+  - name: Questions and workflow help
+    url: https://github.com/dual1208/App-Store-Connect-CLI/discussions
+    about: Ask "how do I...?" questions, get install help, and share workflows
+  - name: Support policy
+    url: https://github.com/dual1208/App-Store-Connect-CLI/blob/main/SUPPORT.md
+    about: See when to use Discussions vs Issues and what to include in a bug report
+  - name: Documentation
+    url: https://github.com/dual1208/App-Store-Connect-CLI
+    about: Read the docs and guides

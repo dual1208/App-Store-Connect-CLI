@@ -1,0 +1,16 @@
+# Keep Mintlify focused on the published documentation surface at repo root.
+.githooks/
+.github/
+.wrangler/
+apps/
+cmd/
+docs/
+internal/
+scripts/
+worktrees/
+/*.md
+*.go
+go.mod
+go.sum
+Makefile
+wrangler.toml

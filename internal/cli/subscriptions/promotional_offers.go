@@ -1,0 +1,471 @@
+package subscriptions
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
+	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
+)
+
+// SubscriptionsPromotionalOffersCommand returns the promotional offers command group.
+func SubscriptionsPromotionalOffersCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers", flag.ExitOnError)
+
+	return &ffcli.Command{
+		Name:       "promotional-offers",
+		ShortUsage: "asc subscriptions promotional-offers <subcommand> [flags]",
+		ShortHelp:  "Manage subscription promotional offers.",
+		LongHelp: `Manage subscription promotional offers.
+
+Examples:
+  asc subscriptions promotional-offers list --subscription-id "SUB_ID"
+  asc subscriptions promotional-offers create --subscription-id "SUB_ID" --offer-code "SPRING" --name "Spring" --offer-duration ONE_MONTH --offer-mode FREE_TRIAL --number-of-periods 1 --prices "PRICE_ID"`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Subcommands: []*ffcli.Command{
+			SubscriptionsPromotionalOffersListCommand(),
+			SubscriptionsPromotionalOffersGetCommand(),
+			SubscriptionsPromotionalOffersCreateCommand(),
+			SubscriptionsPromotionalOffersUpdateCommand(),
+			SubscriptionsPromotionalOffersDeleteCommand(),
+			SubscriptionsPromotionalOfferPricesCommand(),
+		},
+		Exec: func(ctx context.Context, args []string) error {
+			return flag.ErrHelp
+		},
+	}
+}
+
+// SubscriptionsPromotionalOffersListCommand returns the promotional offers list subcommand.
+func SubscriptionsPromotionalOffersListCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers list", flag.ExitOnError)
+
+	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	appID := addSubscriptionLookupAppFlag(fs)
+	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
+	next := fs.String("next", "", "Fetch next page using a links.next URL")
+	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+	subscriptionFields := fs.String("subscription-fields", "", "Included subscription fields (comma-separated)")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "list",
+		ShortUsage: "asc subscriptions promotional-offers list [flags]",
+		ShortHelp:  "List promotional offers for a subscription.",
+		LongHelp: `List promotional offers for a subscription.
+
+Examples:
+  asc subscriptions promotional-offers list --subscription-id "SUB_ID"
+  asc subscriptions promotional-offers list --subscription-id "SUB_ID" --paginate`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return fmt.Errorf("subscriptions promotional-offers list: --limit must be between 1 and 200")
+			}
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return fmt.Errorf("subscriptions promotional-offers list: %w", err)
+			}
+			if err := validateNextExclusiveFlags(fs, *next, "subscription-id", "app", "limit", "subscription-fields"); err != nil {
+				return err
+			}
+			selectedSubscriptionFields, err := normalizeSparseFieldsFlag(fs, *next, "subscription-fields", *subscriptionFields, subscriptionFieldsList())
+			if err != nil {
+				return err
+			}
+
+			id := strings.TrimSpace(*subscriptionID)
+			if id == "" && strings.TrimSpace(*next) == "" {
+				fmt.Fprintln(os.Stderr, "Error: --subscription-id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers list: %w", err)
+			}
+
+			if strings.TrimSpace(*next) == "" {
+				id, err = resolveSubscriptionLookupIDWithTimeout(ctx, client, *appID, id)
+				if err != nil {
+					return err
+				}
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			opts := []asc.SubscriptionPromotionalOffersOption{
+				asc.WithSubscriptionPromotionalOffersLimit(*limit),
+				asc.WithSubscriptionPromotionalOffersNextURL(*next),
+				asc.WithSubscriptionPromotionalOffersSubscriptionFields(selectedSubscriptionFields),
+				asc.WithSubscriptionPromotionalOffersInclude(includeRelationshipForFields(selectedSubscriptionFields, "subscription")),
+			}
+
+			if *paginate {
+				paginateOpts := opts
+				if strings.TrimSpace(*next) == "" {
+					paginateOpts = append(paginateOpts, asc.WithSubscriptionPromotionalOffersLimit(200))
+				}
+				firstPage, err := client.GetSubscriptionPromotionalOffers(requestCtx, id, paginateOpts...)
+				if err != nil {
+					return fmt.Errorf("subscriptions promotional-offers list: failed to fetch: %w", err)
+				}
+
+				resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+					return client.GetSubscriptionPromotionalOffers(ctx, id, asc.WithSubscriptionPromotionalOffersNextURL(nextURL))
+				})
+				if err != nil {
+					return fmt.Errorf("subscriptions promotional-offers list: %w", err)
+				}
+
+				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			}
+
+			resp, err := client.GetSubscriptionPromotionalOffers(requestCtx, id, opts...)
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers list: failed to fetch: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// SubscriptionsPromotionalOffersGetCommand returns the promotional offers get subcommand.
+func SubscriptionsPromotionalOffersGetCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers view", flag.ExitOnError)
+
+	offerID := fs.String("id", "", "Promotional offer ID")
+	subscriptionFields := fs.String("subscription-fields", "", "Included subscription fields (comma-separated)")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "view",
+		ShortUsage: "asc subscriptions promotional-offers view --id \"OFFER_ID\"",
+		ShortHelp:  "View a promotional offer by ID.",
+		LongHelp: `View a promotional offer by ID.
+
+Examples:
+  asc subscriptions promotional-offers view --id "OFFER_ID"`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			selectedSubscriptionFields, err := normalizeSparseFieldsFlag(fs, "", "subscription-fields", *subscriptionFields, subscriptionFieldsList())
+			if err != nil {
+				return err
+			}
+			id := strings.TrimSpace(*offerID)
+			if id == "" {
+				fmt.Fprintln(os.Stderr, "Error: --id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers view: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			resp, err := client.GetSubscriptionPromotionalOffer(
+				requestCtx, id,
+				asc.WithSubscriptionPromotionalOfferSubscriptionFields(selectedSubscriptionFields),
+				asc.WithSubscriptionPromotionalOfferInclude(includeRelationshipForFields(selectedSubscriptionFields, "subscription")),
+			)
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers view: failed to fetch: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// SubscriptionsPromotionalOffersCreateCommand returns the promotional offers create subcommand.
+func SubscriptionsPromotionalOffersCreateCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers create", flag.ExitOnError)
+
+	subscriptionID := fs.String("subscription-id", "", "Subscription ID, product ID, or exact current name")
+	appID := addSubscriptionLookupAppFlag(fs)
+	offerCode := fs.String("offer-code", "", "Offer code")
+	name := fs.String("name", "", "Offer name")
+	offerDuration := fs.String("offer-duration", "", "Offer duration: "+strings.Join(subscriptionOfferDurationValues, ", "))
+	offerMode := fs.String("offer-mode", "", "Offer mode: "+strings.Join(subscriptionOfferModeValues, ", "))
+	numberOfPeriods := fs.Int("number-of-periods", 0, "Number of periods (required)")
+	prices := fs.String("prices", "", "Promotional offer price ID(s), comma-separated")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "create",
+		ShortUsage: "asc subscriptions promotional-offers create [flags]",
+		ShortHelp:  "Create a promotional offer.",
+		LongHelp: `Create a promotional offer.
+
+Examples:
+  asc subscriptions promotional-offers create --subscription-id "SUB_ID" --offer-code "SPRING" --name "Spring" --offer-duration ONE_MONTH --offer-mode FREE_TRIAL --number-of-periods 1 --prices "PRICE_ID"`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			id := strings.TrimSpace(*subscriptionID)
+			if id == "" {
+				fmt.Fprintln(os.Stderr, "Error: --subscription-id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			offerCodeValue := strings.TrimSpace(*offerCode)
+			if offerCodeValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --offer-code is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			nameValue := strings.TrimSpace(*name)
+			if nameValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --name is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			duration, err := normalizeSubscriptionOfferDuration(*offerDuration)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err.Error())
+				return flag.ErrHelp
+			}
+
+			mode, err := normalizeSubscriptionOfferMode(*offerMode)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err.Error())
+				return flag.ErrHelp
+			}
+
+			if *numberOfPeriods <= 0 {
+				fmt.Fprintln(os.Stderr, "Error: --number-of-periods is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			priceIDs := shared.SplitCSV(*prices)
+			if len(priceIDs) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: --prices is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers create: %w", err)
+			}
+
+			id, err = resolveSubscriptionLookupIDWithTimeout(ctx, client, *appID, id)
+			if err != nil {
+				return err
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			attrs := asc.SubscriptionPromotionalOfferCreateAttributes{
+				Duration:        duration,
+				Name:            nameValue,
+				NumberOfPeriods: *numberOfPeriods,
+				OfferCode:       offerCodeValue,
+				OfferMode:       mode,
+			}
+
+			resp, err := client.CreateSubscriptionPromotionalOffer(requestCtx, id, attrs, priceIDs)
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers create: failed to create: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// SubscriptionsPromotionalOffersUpdateCommand returns the promotional offers update subcommand.
+func SubscriptionsPromotionalOffersUpdateCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers update", flag.ExitOnError)
+
+	offerID := fs.String("id", "", "Promotional offer ID")
+	prices := fs.String("prices", "", "Promotional offer price ID(s), comma-separated")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "update",
+		ShortUsage: "asc subscriptions promotional-offers update [flags]",
+		ShortHelp:  "Update a promotional offer's prices.",
+		LongHelp: `Update a promotional offer's prices.
+
+Examples:
+  asc subscriptions promotional-offers update --id "OFFER_ID" --prices "PRICE_ID"`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			id := strings.TrimSpace(*offerID)
+			if id == "" {
+				fmt.Fprintln(os.Stderr, "Error: --id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			priceIDs := shared.SplitCSV(*prices)
+			if len(priceIDs) == 0 {
+				fmt.Fprintln(os.Stderr, "Error: --prices is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers update: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			resp, err := client.UpdateSubscriptionPromotionalOffer(requestCtx, id, priceIDs)
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers update: failed to update: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// SubscriptionsPromotionalOffersDeleteCommand returns the promotional offers delete subcommand.
+func SubscriptionsPromotionalOffersDeleteCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers delete", flag.ExitOnError)
+
+	offerID := fs.String("id", "", "Promotional offer ID")
+	confirm := fs.Bool("confirm", false, "Confirm deletion")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "delete",
+		ShortUsage: "asc subscriptions promotional-offers delete --id \"OFFER_ID\" --confirm",
+		ShortHelp:  "Delete a promotional offer.",
+		LongHelp: `Delete a promotional offer.
+
+Examples:
+  asc subscriptions promotional-offers delete --id "OFFER_ID" --confirm`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			id := strings.TrimSpace(*offerID)
+			if id == "" {
+				fmt.Fprintln(os.Stderr, "Error: --id is required")
+				return shared.MissingRequiredUsageError()
+			}
+			if !*confirm {
+				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers delete: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			if err := client.DeleteSubscriptionPromotionalOffer(requestCtx, id); err != nil {
+				return fmt.Errorf("subscriptions promotional-offers delete: failed to delete: %w", err)
+			}
+
+			result := &asc.AssetDeleteResult{ID: id, Deleted: true}
+			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// SubscriptionsPromotionalOfferPricesCommand returns the promotional offer prices subcommand.
+func SubscriptionsPromotionalOfferPricesCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("promotional-offers prices", flag.ExitOnError)
+
+	offerID := fs.String("id", "", "Promotional offer ID")
+	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
+	next := fs.String("next", "", "Fetch next page using a links.next URL")
+	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+	pricePointFields := fs.String("price-point-fields", "", "Included subscription price point fields (comma-separated)")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "prices",
+		ShortUsage: "asc subscriptions promotional-offers prices --id \"OFFER_ID\" [flags]",
+		ShortHelp:  "List prices for a promotional offer.",
+		LongHelp: `List prices for a promotional offer.
+
+Examples:
+  asc subscriptions promotional-offers prices --id "OFFER_ID"
+  asc subscriptions promotional-offers prices --id "OFFER_ID" --paginate`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return fmt.Errorf("subscriptions promotional-offers prices: --limit must be between 1 and 200")
+			}
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return fmt.Errorf("subscriptions promotional-offers prices: %w", err)
+			}
+			if err := validateNextExclusiveFlags(fs, *next, "id", "limit", "price-point-fields"); err != nil {
+				return err
+			}
+			selectedPricePointFields, err := normalizeSparseFieldsFlag(fs, *next, "price-point-fields", *pricePointFields, subscriptionPricePointFieldsList())
+			if err != nil {
+				return err
+			}
+
+			id := strings.TrimSpace(*offerID)
+			if id == "" && strings.TrimSpace(*next) == "" {
+				fmt.Fprintln(os.Stderr, "Error: --id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers prices: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			opts := []asc.SubscriptionPromotionalOfferPricesOption{
+				asc.WithSubscriptionPromotionalOfferPricesLimit(*limit),
+				asc.WithSubscriptionPromotionalOfferPricesNextURL(*next),
+				asc.WithSubscriptionPromotionalOfferPricesPricePointFields(selectedPricePointFields),
+				asc.WithSubscriptionPromotionalOfferPricesInclude(includeRelationshipForFields(selectedPricePointFields, "subscriptionPricePoint")),
+			}
+
+			if *paginate {
+				paginateOpts := opts
+				if strings.TrimSpace(*next) == "" {
+					paginateOpts = append(paginateOpts, asc.WithSubscriptionPromotionalOfferPricesLimit(200))
+				}
+				firstPage, err := client.GetSubscriptionPromotionalOfferPrices(requestCtx, id, paginateOpts...)
+				if err != nil {
+					return fmt.Errorf("subscriptions promotional-offers prices: failed to fetch: %w", err)
+				}
+
+				resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+					return client.GetSubscriptionPromotionalOfferPrices(ctx, id, asc.WithSubscriptionPromotionalOfferPricesNextURL(nextURL))
+				})
+				if err != nil {
+					return fmt.Errorf("subscriptions promotional-offers prices: %w", err)
+				}
+
+				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			}
+
+			resp, err := client.GetSubscriptionPromotionalOfferPrices(requestCtx, id, opts...)
+			if err != nil {
+				return fmt.Errorf("subscriptions promotional-offers prices: failed to fetch: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}

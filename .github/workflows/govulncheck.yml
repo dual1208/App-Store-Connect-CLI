@@ -1,0 +1,34 @@
+name: Govulncheck
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Run weekly to catch newly disclosed vulnerabilities in existing dependencies.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Run govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          go-download-base-url: https://dl.google.com/go
+          cache: true
+
+      - name: Install govulncheck
+        run: make install-govulncheck
+
+      - name: Scan Go dependencies and reachable code paths
+        run: govulncheck -format text ./...

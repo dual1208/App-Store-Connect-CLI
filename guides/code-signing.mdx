@@ -1,0 +1,14 @@
+# Code Signing Resources
+
+> Use App Store Connect APIs to manage certificates and provisioning profiles.
+
+The CLI can list, create, download, and revoke certificate resources and can create or download provisioning profiles. It intentionally does not manage local signing identities, private keys, or operating-system credential stores.
+
+```bash
+asc bundle-ids list
+asc certificates list
+asc profiles list
+asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --output ./signing-assets
+```
+
+Generate and protect private keys outside this CLI. Treat downloaded profiles and certificates as build inputs, keep sensitive material out of source control, and use an explicitly isolated build environment for any signing operation.

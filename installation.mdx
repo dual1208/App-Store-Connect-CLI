@@ -1,0 +1,73 @@
+# Installation
+
+> Build the App Store Connect CLI from reviewed source
+
+`asc` is a Go binary. This repository intentionally does not provide a remote
+installer or recommend piping downloaded scripts into a shell.
+
+## Requirements
+
+* macOS or Linux
+* Go version declared by `go.mod`
+* Git
+
+## Build a reviewed commit
+
+Choose and review an exact full commit before building:
+
+```bash
+git clone https://github.com/dual1208/App-Store-Connect-CLI.git
+cd App-Store-Connect-CLI
+git checkout "FULL_REVIEWED_COMMIT_SHA"
+go build -trimpath -o asc .
+```
+
+If the repository does not use signed commits, compare `git rev-parse HEAD`
+with the reviewed SHA through an independent channel before installing.
+
+## Install locally
+
+```bash
+install -d "$HOME/.local/bin"
+install -m 0755 ./asc "$HOME/.local/bin/asc"
+"$HOME/.local/bin/asc" version
+```
+
+Add `$HOME/.local/bin` to `PATH` if necessary:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Verify the binary
+
+Record the binary hash alongside the reviewed source commit:
+
+```bash
+shasum -a 256 "$HOME/.local/bin/asc"       # macOS
+sha256sum "$HOME/.local/bin/asc"           # Linux
+go version -m "$HOME/.local/bin/asc"
+```
+
+## Upgrade
+
+Fetch, inspect, and check out another exact commit, then repeat the build and
+hash verification steps. Do not substitute a moving branch or tag for the
+reviewed commit.
+
+## Shell completion
+
+```bash
+asc completion --shell bash > "$HOME/.local/share/bash-completion/completions/asc"
+asc completion --shell zsh > "${fpath[1]}/_asc"
+asc completion --shell fish > "$HOME/.config/fish/completions/asc.fish"
+```
+
+## Development checks
+
+```bash
+make format
+make check-docs
+make lint
+ASC_BYPASS_KEYCHAIN=1 make test
+```

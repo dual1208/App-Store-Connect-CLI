@@ -1,0 +1,22 @@
+# Troubleshooting
+
+> Common App Store Connect CLI failures.
+
+## Authentication
+
+Run `asc auth doctor` and `asc auth status`. Confirm the key ID, issuer ID, selected profile, and `.p8` path. The profile directory must be mode `0700`; config and key files must be regular current-user-owned files with mode `0600` and one hard link.
+
+Use a separate `ASC_CONFIG_PATH` when testing. Clear incomplete `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY_PATH`, `ASC_PRIVATE_KEY`, and `ASC_PRIVATE_KEY_B64` values that could conflict with a file profile.
+
+## HTTP failures
+
+- `401`: verify the credential and system clock.
+- `403`: verify the API-key role and resource access.
+- `404`: confirm the resource belongs to the selected team.
+- `429`: retry after the server-provided delay.
+
+Use `--api-debug` only with redacted logs. Never paste tokens, cookies, private keys, passwords, or authorization headers into an issue.
+
+## Web login
+
+Set `ASC_WEB_SESSION_CACHE=0` to retry without a saved session. Set `ASC_WEB_DONT_STORE_PASSWORD=1` to prevent password persistence. Session and password caches are private files under `~/.asc/`; override their locations with `ASC_WEB_SESSION_CACHE_DIR` and `ASC_WEB_PASSWORD_STORE_DIR` for isolated testing.

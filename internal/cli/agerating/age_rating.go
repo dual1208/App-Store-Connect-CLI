@@ -1,0 +1,569 @@
+package agerating
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"net/url"
+	"os"
+	"slices"
+	"strings"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
+	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
+)
+
+var ageRatingLevelValues = []string{
+	"NONE",
+	"INFREQUENT_OR_MILD",
+	"FREQUENT_OR_INTENSE",
+	"INFREQUENT",
+	"FREQUENT",
+}
+
+var ageRatingOverrideValues = []string{
+	"NONE",
+	"NINE_PLUS",
+	"THIRTEEN_PLUS",
+	"SIXTEEN_PLUS",
+	"SEVENTEEN_PLUS",
+	"UNRATED",
+}
+
+var ageRatingOverrideV2Values = []string{
+	"NONE",
+	"NINE_PLUS",
+	"THIRTEEN_PLUS",
+	"SIXTEEN_PLUS",
+	"EIGHTEEN_PLUS",
+	"UNRATED",
+}
+
+var koreaAgeRatingOverrideValues = []string{
+	"NONE",
+	"FIFTEEN_PLUS",
+	"NINETEEN_PLUS",
+}
+
+var kidsAgeBandValues = []string{
+	"FIVE_AND_UNDER",
+	"SIX_TO_EIGHT",
+	"NINE_TO_ELEVEN",
+}
+
+var ageRatingSparseFields441 = []string{
+	"socialMedia",
+	"socialMediaAgeRestricted",
+}
+
+// AgeRatingCommand returns the age rating command with subcommands.
+func AgeRatingCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("age-rating", flag.ExitOnError)
+
+	return &ffcli.Command{
+		Name:       "age-rating",
+		ShortUsage: "asc age-rating <subcommand> [flags]",
+		ShortHelp:  "Manage App Store age rating declarations.",
+		LongHelp: `Manage App Store age rating declarations for an app, app info, or version.
+
+Examples:
+  asc age-rating view --app APP_ID
+  asc age-rating view --app-info-id APP_INFO_ID
+  asc age-rating edit --app APP_ID --kids-age-band FIVE_AND_UNDER --gambling false`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Subcommands: []*ffcli.Command{
+			AgeRatingViewCommand(),
+			AgeRatingEditCommand(),
+		},
+		Exec: func(ctx context.Context, args []string) error {
+			return flag.ErrHelp
+		},
+	}
+}
+
+// AgeRatingViewCommand returns the age-rating view subcommand.
+func AgeRatingViewCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("age-rating view", flag.ExitOnError)
+
+	appID := fs.String("app", os.Getenv("ASC_APP_ID"), "App ID (required unless --app-info-id or --version-id is provided)")
+	appInfoID := fs.String("app-info-id", "", "App info ID (optional)")
+	versionID := fs.String("version-id", "", "App Store version ID (optional)")
+	fields := fs.String("fields", "", "Sparse fields: socialMedia, socialMediaAgeRestricted")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "view",
+		ShortUsage: "asc age-rating view --app APP_ID [flags]",
+		ShortHelp:  "View an age rating declaration.",
+		LongHelp: `Get the current age rating declaration.
+
+Examples:
+  asc age-rating view --app APP_ID
+  asc age-rating view --app-info-id APP_INFO_ID
+  asc age-rating view --app-info-id APP_INFO_ID --fields socialMedia,socialMediaAgeRestricted
+  asc age-rating view --version-id VERSION_ID`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			appInfoValue := strings.TrimSpace(*appInfoID)
+			versionValue := strings.TrimSpace(*versionID)
+			appValue := strings.TrimSpace(shared.ResolveAppID(strings.TrimSpace(*appID)))
+
+			if appInfoValue != "" && versionValue != "" {
+				return fmt.Errorf("age-rating view: only one of --app-info-id or --version-id is allowed")
+			}
+			if appInfoValue == "" && versionValue == "" && appValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+				return shared.MissingRequiredUsageError()
+			}
+			fieldValues, err := shared.NormalizeSelection(*fields, ageRatingSparseFields441, "--fields")
+			if err != nil {
+				return shared.UsageError(err.Error())
+			}
+			fieldsProvided := false
+			fs.Visit(func(f *flag.Flag) { fieldsProvided = fieldsProvided || f.Name == "fields" })
+			if fieldsProvided && len(fieldValues) == 0 {
+				return shared.UsageError("--fields must not be empty")
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("age-rating view: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			resp, err := fetchAgeRatingDeclaration(requestCtx, client, appValue, appInfoValue, versionValue, fieldValues)
+			if err != nil {
+				return fmt.Errorf("age-rating view: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// AgeRatingEditCommand returns the age-rating edit subcommand.
+func AgeRatingEditCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("age-rating edit", flag.ExitOnError)
+
+	id := fs.String("id", "", "Age rating declaration ID (optional)")
+	appID := fs.String("app", os.Getenv("ASC_APP_ID"), "App ID (required unless --id, --app-info-id, or --version-id is provided)")
+	appInfoID := fs.String("app-info-id", "", "App info ID (optional)")
+	versionID := fs.String("version-id", "", "App Store version ID (optional)")
+	allNone := fs.Bool("all-none", false, "Set all ratings to NONE/false (safe default for apps with no objectionable content)")
+
+	// Boolean content descriptors
+	advertising := fs.String("advertising", "", "Contains advertising (true/false)")
+	gambling := fs.String("gambling", "", "Real gambling content (true/false)")
+	healthOrWellnessTopics := fs.String("health-or-wellness-topics", "", "Health or wellness topics (true/false)")
+	lootBox := fs.String("loot-box", "", "Loot box mechanics (true/false)")
+	messagingAndChat := fs.String("messaging-and-chat", "", "Messaging and chat (true/false)")
+	parentalControls := fs.String("parental-controls", "", "Parental controls (true/false)")
+	ageAssurance := fs.String("age-assurance", "", "Age assurance (true/false)")
+	socialMedia := fs.String("social-media", "", "Social media features (true/false)")
+	socialMediaAgeRestricted := fs.String("social-media-age-restricted", "", "Social media is age-restricted (true/false)")
+	unrestrictedWebAccess := fs.String("unrestricted-web-access", "", "Unrestricted web access (true/false)")
+	userGeneratedContent := fs.String("user-generated-content", "", "User-generated content (true/false)")
+
+	// Enum content descriptors (NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE)
+	alcoholTobaccoDrug := fs.String("alcohol-tobacco-drug-use", "", "Alcohol/tobacco/drug references: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	contests := fs.String("contests", "", "Contests: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	gamblingSimulated := fs.String("gambling-simulated", "", "Simulated gambling: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	gunsOrOtherWeapons := fs.String("guns-or-other-weapons", "", "Guns or other weapons: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	medicalTreatment := fs.String("medical-treatment", "", "Medical/treatment information: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	profanityHumor := fs.String("profanity-humor", "", "Profanity or crude humor: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	sexualContentNudity := fs.String("sexual-content-nudity", "", "Sexual content or nudity: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	sexualContentGraphicNudity := fs.String("sexual-content-graphic-nudity", "", "Graphic sexual content or nudity: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	horrorFear := fs.String("horror-fear", "", "Horror or fear themes: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	matureSuggestive := fs.String("mature-suggestive", "", "Mature or suggestive themes: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	violenceCartoon := fs.String("violence-cartoon", "", "Cartoon/fantasy violence: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	violenceRealistic := fs.String("violence-realistic", "", "Realistic violence: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+	violenceRealisticGraphic := fs.String("violence-realistic-graphic", "", "Prolonged graphic/sadistic violence: NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE")
+
+	// Other
+	kidsAgeBand := fs.String("kids-age-band", "", "Kids age band: FIVE_AND_UNDER, SIX_TO_EIGHT, NINE_TO_ELEVEN")
+	ageRatingOverride := fs.String("age-rating-override", "", "Deprecated age rating override: NONE, NINE_PLUS, THIRTEEN_PLUS, SIXTEEN_PLUS, SEVENTEEN_PLUS, UNRATED")
+	ageRatingOverrideV2 := fs.String("age-rating-override-v2", "", "Age rating override v2: NONE, NINE_PLUS, THIRTEEN_PLUS, SIXTEEN_PLUS, EIGHTEEN_PLUS, UNRATED")
+	koreaAgeRatingOverride := fs.String("korea-age-rating-override", "", "Korea age rating override: NONE, FIFTEEN_PLUS, NINETEEN_PLUS")
+	developerAgeRatingInfoURL := fs.String("developer-age-rating-info-url", "", "Developer age rating information URL")
+
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "edit",
+		ShortUsage: "asc age-rating edit --id DECLARATION_ID [flags]",
+		ShortHelp:  "Update an age rating declaration.",
+		LongHelp: `Update an age rating declaration.
+
+Use --all-none to set all ratings to their safe defaults (NONE/false) in one
+command, then override individual fields as needed.
+
+App Store Connect accepts --social-media true only when user-generated content
+is true. It accepts --social-media-age-restricted true only when age assurance
+and social media are both true. Include the matching prerequisite flags when
+enabling these fields unless the declaration already stores them as true.
+
+Examples:
+  asc age-rating edit --app APP_ID --all-none
+  asc age-rating edit --app APP_ID --all-none --unrestricted-web-access true
+  asc age-rating edit --id DECLARATION_ID --gambling false --kids-age-band FIVE_AND_UNDER
+  asc age-rating edit --app APP_ID --social-media true --user-generated-content true
+  asc age-rating edit --app APP_ID --social-media-age-restricted true --age-assurance true --social-media true --user-generated-content true`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if len(args) > 0 {
+				return shared.UsageErrorf("unexpected argument(s): %s", strings.Join(args, " "))
+			}
+
+			idValue := strings.TrimSpace(*id)
+			appInfoValue := strings.TrimSpace(*appInfoID)
+			versionValue := strings.TrimSpace(*versionID)
+			appValue := strings.TrimSpace(shared.ResolveAppID(strings.TrimSpace(*appID)))
+
+			if idValue == "" {
+				if appInfoValue != "" && versionValue != "" {
+					return fmt.Errorf("age-rating edit: only one of --app-info-id or --version-id is allowed")
+				}
+				if appInfoValue == "" && versionValue == "" && appValue == "" {
+					fmt.Fprintln(os.Stderr, "Error: --id or --app is required (or set ASC_APP_ID)")
+					return shared.MissingRequiredUsageError()
+				}
+			}
+
+			values := map[string]string{
+				// Boolean content descriptors
+				"advertising":                 *advertising,
+				"gambling":                    *gambling,
+				"health-or-wellness-topics":   *healthOrWellnessTopics,
+				"loot-box":                    *lootBox,
+				"messaging-and-chat":          *messagingAndChat,
+				"parental-controls":           *parentalControls,
+				"age-assurance":               *ageAssurance,
+				"social-media":                *socialMedia,
+				"social-media-age-restricted": *socialMediaAgeRestricted,
+				"unrestricted-web-access":     *unrestrictedWebAccess,
+				"user-generated-content":      *userGeneratedContent,
+				// Enum content descriptors
+				"alcohol-tobacco-drug-use":      *alcoholTobaccoDrug,
+				"contests":                      *contests,
+				"gambling-simulated":            *gamblingSimulated,
+				"guns-or-other-weapons":         *gunsOrOtherWeapons,
+				"medical-treatment":             *medicalTreatment,
+				"profanity-humor":               *profanityHumor,
+				"sexual-content-nudity":         *sexualContentNudity,
+				"sexual-content-graphic-nudity": *sexualContentGraphicNudity,
+				"horror-fear":                   *horrorFear,
+				"mature-suggestive":             *matureSuggestive,
+				"violence-cartoon":              *violenceCartoon,
+				"violence-realistic":            *violenceRealistic,
+				"violence-realistic-graphic":    *violenceRealisticGraphic,
+				// Other
+				"kids-age-band":                 *kidsAgeBand,
+				"age-rating-override":           *ageRatingOverride,
+				"age-rating-override-v2":        *ageRatingOverrideV2,
+				"korea-age-rating-override":     *koreaAgeRatingOverride,
+				"developer-age-rating-info-url": *developerAgeRatingInfoURL,
+			}
+
+			if *allNone {
+				applyAllNoneDefaults(values)
+			}
+
+			// Keep the existing validation/error contract for established fields,
+			// while treating invalid values for the new 4.4.1 boolean flags as
+			// command-line usage errors.
+			for _, flag := range []string{"social-media", "social-media-age-restricted"} {
+				if strings.TrimSpace(values[flag]) == "" {
+					continue
+				}
+				if _, err := shared.ParseOptionalBoolFlag("--"+flag, values[flag]); err != nil {
+					return shared.UsageError(err.Error())
+				}
+			}
+
+			attributes, err := buildAgeRatingAttributes(values)
+			if err != nil {
+				return err
+			}
+			if err := validateAgeRatingDependencies(attributes); err != nil {
+				return err
+			}
+
+			if !hasAgeRatingUpdates(attributes) {
+				return shared.UsageError("age-rating edit: at least one update flag is required")
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("age-rating edit: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			if idValue == "" {
+				idValue, err = resolveAgeRatingDeclarationID(requestCtx, client, appValue, appInfoValue, versionValue)
+				if err != nil {
+					return fmt.Errorf("age-rating edit: %w", err)
+				}
+			}
+
+			resp, err := client.UpdateAgeRatingDeclaration(requestCtx, idValue, attributes)
+			if err != nil {
+				return fmt.Errorf("age-rating edit: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+func validateAgeRatingDependencies(attrs asc.AgeRatingDeclarationAttributes) error {
+	if boolIsTrue(nullableBoolValue(attrs.SocialMedia)) && boolIsFalse(attrs.UserGeneratedContent) {
+		return shared.UsageError("--social-media true cannot be combined with --user-generated-content false")
+	}
+	if boolIsTrue(nullableBoolValue(attrs.SocialMediaAgeRestricted)) && boolIsFalse(attrs.AgeAssurance) {
+		return shared.UsageError("--social-media-age-restricted true cannot be combined with --age-assurance false")
+	}
+	if boolIsTrue(nullableBoolValue(attrs.SocialMediaAgeRestricted)) && boolIsFalse(nullableBoolValue(attrs.SocialMedia)) {
+		return shared.UsageError("--social-media-age-restricted true cannot be combined with --social-media false")
+	}
+	if boolIsTrue(nullableBoolValue(attrs.SocialMediaAgeRestricted)) && boolIsFalse(attrs.UserGeneratedContent) {
+		return shared.UsageError("--social-media-age-restricted true cannot be combined with --user-generated-content false")
+	}
+	return nil
+}
+
+func boolIsTrue(value *bool) bool {
+	return value != nil && *value
+}
+
+func boolIsFalse(value *bool) bool {
+	return value != nil && !*value
+}
+
+func nullableBoolValue(value *asc.NullableBool) *bool {
+	if value == nil {
+		return nil
+	}
+	return value.Value
+}
+
+func fetchAgeRatingDeclaration(ctx context.Context, client *asc.Client, appID, appInfoID, versionID string, fields []string) (*asc.AgeRatingDeclarationResponse, error) {
+	opts := []asc.AgeRatingDeclarationOption{asc.WithAgeRatingDeclarationFields(fields)}
+	switch {
+	case appInfoID != "":
+		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID, opts...)
+	case versionID != "":
+		return client.GetAgeRatingDeclarationForAppStoreVersion(ctx, versionID, opts...)
+	default:
+		appInfos, err := client.GetAppInfos(ctx, appID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get app info: %w", err)
+		}
+		if len(appInfos.Data) == 0 {
+			return nil, fmt.Errorf("no app info found for app %s", appID)
+		}
+		appInfoID := appInfos.Data[0].ID
+		if strings.TrimSpace(appInfoID) == "" {
+			return nil, fmt.Errorf("app info id is empty for app %s", appID)
+		}
+		return client.GetAgeRatingDeclarationForAppInfo(ctx, appInfoID, opts...)
+	}
+}
+
+func resolveAgeRatingDeclarationID(ctx context.Context, client *asc.Client, appID, appInfoID, versionID string) (string, error) {
+	resp, err := fetchAgeRatingDeclaration(ctx, client, appID, appInfoID, versionID, nil)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(resp.Data.ID)
+	if id == "" {
+		return "", fmt.Errorf("age rating declaration id is empty")
+	}
+	return id, nil
+}
+
+func buildAgeRatingAttributes(values map[string]string) (asc.AgeRatingDeclarationAttributes, error) {
+	var attrs asc.AgeRatingDeclarationAttributes
+
+	// Boolean content descriptors
+	boolFields := []struct {
+		flag string
+		dest **bool
+	}{
+		{"advertising", &attrs.Advertising},
+		{"gambling", &attrs.Gambling},
+		{"health-or-wellness-topics", &attrs.HealthOrWellnessTopics},
+		{"loot-box", &attrs.LootBox},
+		{"messaging-and-chat", &attrs.MessagingAndChat},
+		{"parental-controls", &attrs.ParentalControls},
+		{"age-assurance", &attrs.AgeAssurance},
+		{"unrestricted-web-access", &attrs.UnrestrictedWebAccess},
+		{"user-generated-content", &attrs.UserGeneratedContent},
+	}
+	for _, f := range boolFields {
+		val, err := shared.ParseOptionalBoolFlag("--"+f.flag, values[f.flag])
+		if err != nil {
+			return attrs, err
+		}
+		*f.dest = val
+	}
+	nullableBoolFields := []struct {
+		flag string
+		dest **asc.NullableBool
+	}{
+		{"social-media", &attrs.SocialMedia},
+		{"social-media-age-restricted", &attrs.SocialMediaAgeRestricted},
+	}
+	for _, f := range nullableBoolFields {
+		val, err := shared.ParseOptionalBoolFlag("--"+f.flag, values[f.flag])
+		if err != nil {
+			return attrs, err
+		}
+		if val != nil {
+			*f.dest = &asc.NullableBool{Value: val}
+		}
+	}
+
+	// Enum content descriptors (NONE, INFREQUENT_OR_MILD, FREQUENT_OR_INTENSE)
+	enumFields := []struct {
+		flag    string
+		dest    **string
+		allowed []string
+	}{
+		{"alcohol-tobacco-drug-use", &attrs.AlcoholTobaccoOrDrugUseOrReferences, ageRatingLevelValues},
+		{"contests", &attrs.Contests, ageRatingLevelValues},
+		{"gambling-simulated", &attrs.GamblingSimulated, ageRatingLevelValues},
+		{"guns-or-other-weapons", &attrs.GunsOrOtherWeapons, ageRatingLevelValues},
+		{"medical-treatment", &attrs.MedicalOrTreatmentInformation, ageRatingLevelValues},
+		{"profanity-humor", &attrs.ProfanityOrCrudeHumor, ageRatingLevelValues},
+		{"sexual-content-nudity", &attrs.SexualContentOrNudity, ageRatingLevelValues},
+		{"sexual-content-graphic-nudity", &attrs.SexualContentGraphicAndNudity, ageRatingLevelValues},
+		{"horror-fear", &attrs.HorrorOrFearThemes, ageRatingLevelValues},
+		{"mature-suggestive", &attrs.MatureOrSuggestiveThemes, ageRatingLevelValues},
+		{"violence-cartoon", &attrs.ViolenceCartoonOrFantasy, ageRatingLevelValues},
+		{"violence-realistic", &attrs.ViolenceRealistic, ageRatingLevelValues},
+		{"violence-realistic-graphic", &attrs.ViolenceRealisticProlongedGraphicOrSadistic, ageRatingLevelValues},
+		{"kids-age-band", &attrs.KidsAgeBand, kidsAgeBandValues},
+		{"age-rating-override", &attrs.AgeRatingOverride, ageRatingOverrideValues},
+		{"age-rating-override-v2", &attrs.AgeRatingOverrideV2, ageRatingOverrideV2Values},
+		{"korea-age-rating-override", &attrs.KoreaAgeRatingOverride, koreaAgeRatingOverrideValues},
+	}
+	for _, f := range enumFields {
+		val, err := parseOptionalEnumFlag("--"+f.flag, values[f.flag], f.allowed)
+		if err != nil {
+			return attrs, err
+		}
+		*f.dest = val
+	}
+
+	if raw := strings.TrimSpace(values["developer-age-rating-info-url"]); raw != "" {
+		if _, err := url.ParseRequestURI(raw); err != nil {
+			return attrs, fmt.Errorf("--developer-age-rating-info-url must be a valid URL")
+		}
+		attrs.DeveloperAgeRatingInfoURL = &raw
+	}
+
+	return attrs, nil
+}
+
+func hasAgeRatingUpdates(attrs asc.AgeRatingDeclarationAttributes) bool {
+	return attrs.Advertising != nil ||
+		attrs.Gambling != nil ||
+		attrs.HealthOrWellnessTopics != nil ||
+		attrs.LootBox != nil ||
+		attrs.MessagingAndChat != nil ||
+		attrs.ParentalControls != nil ||
+		attrs.AgeAssurance != nil ||
+		attrs.SocialMedia != nil ||
+		attrs.SocialMediaAgeRestricted != nil ||
+		attrs.UnrestrictedWebAccess != nil ||
+		attrs.UserGeneratedContent != nil ||
+		attrs.AlcoholTobaccoOrDrugUseOrReferences != nil ||
+		attrs.Contests != nil ||
+		attrs.GamblingSimulated != nil ||
+		attrs.GunsOrOtherWeapons != nil ||
+		attrs.MedicalOrTreatmentInformation != nil ||
+		attrs.ProfanityOrCrudeHumor != nil ||
+		attrs.SexualContentOrNudity != nil ||
+		attrs.SexualContentGraphicAndNudity != nil ||
+		attrs.HorrorOrFearThemes != nil ||
+		attrs.MatureOrSuggestiveThemes != nil ||
+		attrs.ViolenceCartoonOrFantasy != nil ||
+		attrs.ViolenceRealistic != nil ||
+		attrs.ViolenceRealisticProlongedGraphicOrSadistic != nil ||
+		attrs.KidsAgeBand != nil ||
+		attrs.AgeRatingOverride != nil ||
+		attrs.AgeRatingOverrideV2 != nil ||
+		attrs.KoreaAgeRatingOverride != nil ||
+		attrs.DeveloperAgeRatingInfoURL != nil
+}
+
+// allNoneBoolFlags lists the boolean content descriptor flag names that
+// --all-none should default to "false".
+var allNoneBoolFlags = []string{
+	"advertising",
+	"gambling",
+	"health-or-wellness-topics",
+	"loot-box",
+	"messaging-and-chat",
+	"parental-controls",
+	"age-assurance",
+	"social-media",
+	"social-media-age-restricted",
+	"unrestricted-web-access",
+	"user-generated-content",
+}
+
+// allNoneEnumFlags lists the enum content descriptor flag names that
+// --all-none should default to "NONE".
+var allNoneEnumFlags = []string{
+	"alcohol-tobacco-drug-use",
+	"contests",
+	"gambling-simulated",
+	"guns-or-other-weapons",
+	"medical-treatment",
+	"profanity-humor",
+	"sexual-content-nudity",
+	"sexual-content-graphic-nudity",
+	"horror-fear",
+	"mature-suggestive",
+	"violence-cartoon",
+	"violence-realistic",
+	"violence-realistic-graphic",
+}
+
+// applyAllNoneDefaults fills in safe defaults (NONE/false) for any content
+// descriptor that was not explicitly provided by the user. Individual flags
+// that are already set take priority over the --all-none shortcut.
+func applyAllNoneDefaults(values map[string]string) {
+	for _, key := range allNoneBoolFlags {
+		if strings.TrimSpace(values[key]) == "" {
+			values[key] = "false"
+		}
+	}
+	for _, key := range allNoneEnumFlags {
+		if strings.TrimSpace(values[key]) == "" {
+			values[key] = "NONE"
+		}
+	}
+}
+
+func parseOptionalEnumFlag(name, raw string, allowed []string) (*string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	normalized := strings.ToUpper(raw)
+	if slices.Contains(allowed, normalized) {
+		return &normalized, nil
+	}
+	return nil, fmt.Errorf("%s must be one of: %s", name, strings.Join(allowed, ", "))
+}

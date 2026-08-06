@@ -1,0 +1,57 @@
+version: "2"
+run:
+  tests: true
+linters:
+  default: none
+  enable:
+    - errcheck
+    - errorlint
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unparam
+    - unused
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*compress/gzip.Reader).Close
+        - (*archive/zip.ReadCloser).Close
+        - (net.Listener).Close
+        - (*net.TCPListener).Close
+        - (*net.UnixListener).Close
+        - (*text/tabwriter.Writer).Flush
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - os.Setenv
+        - os.Unsetenv
+    misspell:
+      ignore-rules:
+        - cancelled
+        - cancelling
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - staticcheck
+        text: 'ST1003:'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

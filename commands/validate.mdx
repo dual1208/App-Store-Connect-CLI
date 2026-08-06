@@ -1,0 +1,123 @@
+# validate
+
+> Validate App Store version readiness before submission
+
+The `validate` command performs preflight validation to check if an App Store version is ready for submission.
+
+## Usage
+
+```bash  theme={null}
+asc validate [flags]
+```
+
+## Validate a version
+
+Check if a version is ready for submission:
+
+```bash  theme={null}
+asc validate --app APP_ID --version VERSION_STRING
+asc validate --app 123456789 --version 1.2.0
+```
+
+## What it checks
+
+The validation process checks:
+
+* Version has a build attached
+* Required metadata is complete (description, keywords, screenshots)
+* Privacy policy URL is set (if required)
+* Age rating is configured
+* App categories are assigned
+* Pricing and availability are configured
+
+## Output
+
+**Success:**
+
+```
+Version 1.2.0 is ready for submission
+```
+
+**Validation errors:**
+
+```
+Validation failed for version 1.2.0:
+  - No build attached to version
+  - Missing screenshots for iPhone 6.5"
+  - Description is empty for en-US
+```
+
+## Flags
+
+<ParamField path="--app" type="string" required>
+  App ID to validate
+</ParamField>
+
+<ParamField path="--version" type="string" required>
+  Version string to validate (e.g., `1.2.0`)
+</ParamField>
+
+<ParamField path="--output" type="string">
+  Output format: `json`, `table`, or `markdown`
+</ParamField>
+
+## Example workflows
+
+### Validate before the release pipeline
+
+```bash  theme={null}
+# Validate version
+if asc validate --app 123456789 --version 1.2.0; then
+  echo "Version is ready, running the release pipeline..."
+  asc publish appstore --app 123456789 --ipa ./build/MyApp.ipa --version 1.2.0 --submit --confirm
+else
+  echo "Validation failed, fix issues before publishing"
+  exit 1
+fi
+```
+
+### CI/CD validation
+
+```yaml  theme={null}
+# GitHub Actions
+- name: Validate version
+  env:
+    APP_ID: ${{ secrets.APP_ID }}
+    TAG_NAME: ${{ github.ref_name }}
+  run: |
+    if ! asc validate --app "$APP_ID" --version "$TAG_NAME"; then
+      echo "Validation failed"
+      exit 1
+    fi
+
+- name: Publish to App Store
+  env:
+    APP_ID: ${{ secrets.APP_ID }}
+    TAG_NAME: ${{ github.ref_name }}
+  run: asc publish appstore --app "$APP_ID" --ipa ./build/MyApp.ipa --version "$TAG_NAME" --submit --confirm
+```
+
+## Exit codes
+
+| Code    | Description              |
+| ------- | ------------------------ |
+| `0`     | Validation passed        |
+| `1`     | Validation failed        |
+| `10-59` | HTTP client errors (4xx) |
+| `60-99` | HTTP server errors (5xx) |
+
+<Tip>
+  Always run `validate` before `asc publish appstore --submit`, or after `asc release stage`, to catch issues early and avoid rejected submissions.
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Submit command" icon="paper-plane" href="/commands/submit">
+    Submit for App Store review
+  </Card>
+
+  <Card title="Submission guide" icon="book-open" href="/guides/app-store-submission">
+    Complete submission guide
+  </Card>
+</CardGroup>

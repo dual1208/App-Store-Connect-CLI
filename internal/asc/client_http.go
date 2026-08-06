@@ -1,0 +1,714 @@
+package asc
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/dual1208/App-Store-Connect-CLI/internal/urlpolicy"
+	"github.com/dual1208/App-Store-Connect-CLI/internal/urlsanitize"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// newRequest creates a new HTTP request with JWT authentication
+func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	if err := validateAPIPath(path); err != nil {
+		return nil, err
+	}
+
+	// Generate JWT token
+	token, err := c.generateJWT()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate JWT: %w", err)
+	}
+
+	url := path
+	if !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") {
+		url = BaseURL + path
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	return req, nil
+}
+
+// generateJWT generates a JWT for ASC API authentication
+func (c *Client) generateJWT() (string, error) {
+	now := time.Now()
+
+	c.jwtMu.Lock()
+	defer c.jwtMu.Unlock()
+
+	if c.cachedJWT != "" && now.Before(c.cachedJWTExpiresAt.Add(-jwtRefreshSkew)) {
+		return c.cachedJWT, nil
+	}
+
+	signedToken, err := GenerateJWT(c.keyID, c.issuerID, c.privateKey)
+	if err != nil {
+		return "", err
+	}
+
+	c.cachedJWT = signedToken
+	c.cachedJWTExpiresAt = now.Add(tokenLifetime)
+	return signedToken, nil
+}
+
+// GenerateJWT generates a JWT for ASC API authentication.
+func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, error) {
+	now := time.Now()
+	claims := jwt.RegisteredClaims{
+		Audience:  jwt.ClaimStrings{"appstoreconnect-v1"},
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(tokenLifetime)),
+	}
+	if strings.TrimSpace(issuerID) == "" {
+		claims.Subject = "user"
+	} else {
+		claims.Issuer = issuerID
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token.Header["kid"] = keyID
+
+	// Sign with the private key
+	signedToken, err := token.SignedString(privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	return signedToken, nil
+}
+
+// do performs an HTTP request and returns the response.
+// GET/HEAD requests use retry logic for transient failures by default.
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+	if err := validateMutatingRequestTarget(method, path); err != nil {
+		return nil, err
+	}
+
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+	}
+
+	request := func(requestCtx context.Context) ([]byte, error) {
+		var reader io.Reader
+		if bodyBytes != nil {
+			reader = bytes.NewReader(bodyBytes)
+		}
+		return c.doOnce(requestCtx, method, path, reader)
+	}
+
+	if shouldRetryMethod(method) {
+		retryOpts := ResolveRetryOptions()
+		return WithRetry(ctx, func() ([]byte, error) {
+			return request(ctx)
+		}, retryOpts)
+	}
+	if shouldLimitMutatingMethod(method) {
+		return c.doWithMutatingRequestLimiter(ctx, request)
+	}
+
+	return request(ctx)
+}
+
+func (c *Client) doWithMutatingRequestLimiter(ctx context.Context, request func(context.Context) ([]byte, error)) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("wait for mutating request slot: %w", err)
+	}
+
+	requestTimeout, hasDeadline := requestTimeoutBudget(ctx)
+	limiter := c.getMutatingRequestLimiter()
+
+	select {
+	case limiter <- struct{}{}:
+		defer func() { <-limiter }()
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("wait for mutating request slot: %w", err)
+		}
+	case <-ctx.Done():
+		return nil, fmt.Errorf("wait for mutating request slot: %w", ctx.Err())
+	}
+
+	requestCtx, cancel := deriveMutatingRequestContext(ctx, requestTimeout, hasDeadline)
+	defer cancel()
+	return request(requestCtx)
+}
+
+func requestTimeoutBudget(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0, false
+	}
+	return time.Until(deadline), true
+}
+
+func deriveMutatingRequestContext(ctx context.Context, requestTimeout time.Duration, hasDeadline bool) (context.Context, context.CancelFunc) {
+	// Preserve context values, but give queued writes a fresh timeout budget once they acquire a slot.
+	base := context.WithoutCancel(ctx)
+
+	var (
+		requestCtx context.Context
+		cancel     context.CancelFunc
+	)
+	if hasDeadline {
+		requestCtx, cancel = context.WithTimeout(base, requestTimeout)
+	} else {
+		requestCtx, cancel = context.WithCancel(base)
+	}
+
+	stop := context.AfterFunc(ctx, func() {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	return requestCtx, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+	start := time.Now()
+	debugSettings := resolveDebugSettings()
+
+	req, err := c.newRequest(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if debugSettings.verboseHTTP {
+		debugLogger.Info(
+			"→ HTTP Request",
+			"method", method,
+			"url", sanitizeURLForLog(req.URL.String()),
+			"content-type", req.Header.Get("Content-Type"),
+			"authorization", sanitizeAuthHeader(req.Header.Get("Authorization")),
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		if debugSettings.verboseHTTP {
+			debugLogger.Info(
+				"← HTTP Error",
+				"error", err.Error(),
+				"elapsed", elapsed.String(),
+			)
+		}
+		requestErr := fmt.Errorf("request failed: %w", err)
+		if isTransientTransportError(err) {
+			return nil, &RetryableError{Err: requestErr}
+		}
+		return nil, requestErr
+	}
+	defer resp.Body.Close()
+
+	if debugSettings.verboseHTTP {
+		debugLogger.Info(
+			"← HTTP Response",
+			"status", resp.StatusCode,
+			"elapsed", elapsed.String(),
+			"content-type", resp.Header.Get("Content-Type"),
+			"content-length", resp.Header.Get("Content-Length"),
+			"x-rate-limit", resp.Header.Get("X-Rate-Limit"),
+		)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+
+		if isRetryableHTTPStatus(resp.StatusCode) {
+			retryAfter := parseRetryAfterHeader(resp.Header.Get("Retry-After"))
+			return nil, &RetryableError{
+				Err:        buildRetryableError(resp.StatusCode, retryAfter, respBody),
+				RetryAfter: retryAfter,
+			}
+		}
+
+		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		readErr := &responseBodyReadError{err: err}
+		if isTransientTransportError(err) {
+			return nil, &RetryableError{Err: readErr}
+		}
+		return nil, readErr
+	}
+	return data, nil
+}
+
+func isTransientTransportError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+func isRetryableHTTPStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// sanitizeAuthHeader redacts the JWT token from Authorization header for logging.
+func sanitizeAuthHeader(value string) string {
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "Bearer ") {
+		return "Bearer [REDACTED]"
+	}
+	return "[REDACTED]"
+}
+
+func sanitizeURLForLog(rawURL string) string {
+	return urlsanitize.SanitizeURLForLog(rawURL, signedQueryKeys, sensitiveQueryKeys)
+}
+
+func shouldRetryMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldLimitMutatingMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func buildRetryableError(statusCode int, retryAfter time.Duration, respBody []byte) error {
+	base := "API request failed"
+	switch statusCode {
+	case http.StatusRequestTimeout:
+		base = "App Store Connect request timeout"
+	case http.StatusTooManyRequests:
+		base = "rate limited by App Store Connect"
+	case http.StatusInternalServerError:
+		base = "App Store Connect internal server error"
+	case http.StatusBadGateway:
+		base = "App Store Connect bad gateway"
+	case http.StatusServiceUnavailable:
+		base = "App Store Connect service unavailable"
+	case http.StatusGatewayTimeout:
+		base = "App Store Connect gateway timeout"
+	}
+
+	message := fmt.Sprintf("%s (status %d)", base, statusCode)
+	var apiErr *APIError
+	if len(respBody) > 0 {
+		if parsed, ok := errors.AsType[*APIError](ParseErrorWithStatus(respBody, statusCode)); ok {
+			apiErr = parsed
+			message = fmt.Sprintf("%s: %s", message, parsed)
+		}
+	}
+	if apiErr == nil {
+		apiErr = &APIError{
+			Code:       apiErrorCodeFromStatus(statusCode),
+			Title:      base,
+			StatusCode: statusCode,
+		}
+	}
+	if retryAfter > 0 {
+		message = fmt.Sprintf("%s (retry after %s)", message, retryAfter)
+	}
+	return &retryableStatusError{message: message, apiErr: apiErr}
+}
+
+// retryableStatusError keeps the human-readable retry message while exposing
+// the parsed *APIError (and its HTTP status code) through Unwrap, so that
+// errors.Is/errors.As and exit-code mapping still observe the underlying
+// HTTP status after retries are exhausted.
+type retryableStatusError struct {
+	message string
+	apiErr  *APIError
+}
+
+func (e *retryableStatusError) Error() string {
+	return e.message
+}
+
+func (e *retryableStatusError) Unwrap() error {
+	return e.apiErr
+}
+
+// parseRetryAfterHeader parses the Retry-After header value.
+// Supports seconds (e.g., "60") or HTTP-date format (RFC1123, RFC850, ANSIC).
+func parseRetryAfterHeader(value string) time.Duration {
+	if value = strings.TrimSpace(value); value == "" {
+		return 0
+	}
+
+	// Try to parse as seconds first
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	// Try to parse as HTTP-date (try multiple formats)
+	formats := []string{
+		http.TimeFormat, // RFC1123: "Mon, 02 Jan 2006 15:04:05 GMT"
+		time.RFC850,     // RFC850: "Monday, 02-Jan-06 15:04:05 MST"
+		time.ANSIC,      // ANSIC: "Mon Jan _2 15:04:05 2006"
+	}
+	for _, format := range formats {
+		if t, err := time.Parse(format, value); err == nil {
+			delay := time.Until(t)
+			if delay > 0 {
+				return delay
+			}
+		}
+	}
+
+	return 0
+}
+
+// validateNextURL validates that a pagination URL is safe to use.
+// It ensures the URL is on the same host as BaseURL and uses HTTPS.
+func validateNextURL(nextURL string) error {
+	if nextURL == "" {
+		return nil
+	}
+
+	// If it's not an absolute URL, it's relative and safe
+	if !strings.HasPrefix(nextURL, "http://") && !strings.HasPrefix(nextURL, "https://") {
+		return nil
+	}
+
+	parsedURL, err := urlpolicy.ParseHTTPS(nextURL, "pagination URL")
+	if err != nil {
+		return fmt.Errorf("invalid pagination URL: %w", err)
+	}
+
+	baseURL, err := url.Parse(BaseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base URL: %w", err)
+	}
+
+	// Allow URLs on the same host as BaseURL
+	if parsedURL.Host != baseURL.Host {
+		return fmt.Errorf("rejected pagination URL from untrusted host %q (expected %q)", parsedURL.Host, baseURL.Host)
+	}
+
+	return nil
+}
+
+var signedQueryKeys = urlsanitize.CopyKeySet(urlsanitize.DefaultSignedQueryKeys)
+
+var sensitiveQueryKeys = urlsanitize.CopyKeySet(urlsanitize.DefaultSensitiveQueryKeys)
+
+// validateAnalyticsDownloadURL validates that an analytics download URL is safe.
+// It requires HTTPS and allows only trusted hosts, with signed URLs for CDNs.
+func validateAnalyticsDownloadURL(downloadURL string) error {
+	_, err := urlpolicy.ValidateAppleOrSignedHTTPS(downloadURL, "analytics download URL")
+	return err
+}
+
+func (c *Client) doStream(ctx context.Context, path string, accept string) (*http.Response, error) {
+	req, err := c.newRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(accept) != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+func (c *Client) doStreamNoAuth(ctx context.Context, rawURL, accept string) (*http.Response, error) {
+	if _, err := urlpolicy.ParseHTTPS(rawURL, "download URL"); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, newSanitizedNoAuthStreamError("create download request", rawURL, err)
+	}
+	if strings.TrimSpace(accept) != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	client := clientWithoutRedirects(c.httpClient)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, newSanitizedNoAuthStreamError("download request", rawURL, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = resp.Body.Close()
+		// Presigned-CDN error bodies are untrusted and can echo the requested
+		// capability. The status code is sufficient diagnostic context here.
+		return nil, &APIError{
+			Code:       apiErrorCodeFromStatus(resp.StatusCode),
+			Title:      fmt.Sprintf("download request failed with status %d", resp.StatusCode),
+			StatusCode: resp.StatusCode,
+		}
+	}
+	return resp, nil
+}
+
+func newSanitizedNoAuthStreamError(operation, rawURL string, err error) error {
+	return urlsanitize.NewTransportError(operation, urlsanitize.RedactURLForError(rawURL), err)
+}
+
+// BuildRequestBody builds a JSON request body
+func BuildRequestBody(data any) (io.Reader, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	if err := enc.Encode(data); err != nil {
+		return nil, fmt.Errorf("failed to encode request: %w", err)
+	}
+	return &buf, nil
+}
+
+// ParseError parses an error response (status code unknown)
+func ParseError(body []byte) error {
+	return ParseErrorWithStatus(body, 0)
+}
+
+// ParseErrorWithStatus parses an error response and includes the HTTP status code
+func ParseErrorWithStatus(body []byte, statusCode int) error {
+	var errResp struct {
+		Errors []struct {
+			Code   string          `json:"code"`
+			Title  string          `json:"title"`
+			Detail string          `json:"detail"`
+			Meta   json.RawMessage `json:"meta"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal(body, &errResp); err == nil && len(errResp.Errors) > 0 {
+		associatedErrors := parseAssociatedErrors(errResp.Errors[0].Meta)
+		return &APIError{
+			Code:             errResp.Errors[0].Code,
+			Title:            errResp.Errors[0].Title,
+			Detail:           errResp.Errors[0].Detail,
+			StatusCode:       statusCode,
+			AssociatedErrors: associatedErrors,
+		}
+	}
+
+	// Sanitize the error body to prevent information disclosure
+	sanitized := sanitizeErrorBody(body)
+	if strings.TrimSpace(sanitized) == "" {
+		sanitized = "unknown error"
+	}
+
+	return &APIError{
+		Code:       apiErrorCodeFromStatus(statusCode),
+		Title:      "API request failed",
+		Detail:     sanitized,
+		StatusCode: statusCode,
+	}
+}
+
+func parseAssociatedErrors(metaRaw json.RawMessage) map[string][]APIAssociatedError {
+	if len(metaRaw) == 0 {
+		return nil
+	}
+
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		return nil
+	}
+
+	associatedRaw, ok := meta["associatedErrors"]
+	if !ok {
+		return nil
+	}
+
+	var associatedByResourceRaw map[string]json.RawMessage
+	if err := json.Unmarshal(associatedRaw, &associatedByResourceRaw); err != nil {
+		return nil
+	}
+
+	associatedByResource := make(map[string][]APIAssociatedError)
+	for resource, entriesRaw := range associatedByResourceRaw {
+		var rawEntries []json.RawMessage
+		if err := json.Unmarshal(entriesRaw, &rawEntries); err != nil {
+			continue
+		}
+
+		entries := make([]APIAssociatedError, 0, len(rawEntries))
+		for _, rawEntry := range rawEntries {
+			var parsed struct {
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}
+			if err := json.Unmarshal(rawEntry, &parsed); err != nil {
+				continue
+			}
+			if strings.TrimSpace(parsed.Code) == "" && strings.TrimSpace(parsed.Detail) == "" {
+				continue
+			}
+			entries = append(entries, APIAssociatedError{
+				Code:   parsed.Code,
+				Detail: parsed.Detail,
+			})
+		}
+
+		if len(entries) > 0 {
+			associatedByResource[resource] = entries
+		}
+	}
+
+	if len(associatedByResource) == 0 {
+		return nil
+	}
+	return associatedByResource
+}
+
+func apiErrorCodeFromStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "BAD_REQUEST"
+	case http.StatusUnauthorized:
+		return "UNAUTHORIZED"
+	case http.StatusForbidden:
+		return "FORBIDDEN"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusConflict:
+		return "CONFLICT"
+	default:
+		return ""
+	}
+}
+
+// sanitizeErrorBody limits the length and strips control characters from error bodies
+// to prevent information disclosure and terminal escape sequence attacks.
+func sanitizeErrorBody(body []byte) string {
+	const maxLength = 200
+	// Limit length
+	if len(body) > maxLength {
+		body = body[:maxLength]
+	}
+	// Strip control characters but keep printable characters and newlines
+	result := make([]byte, 0, len(body))
+	for _, b := range body {
+		if b >= 32 || b == '\n' || b == '\r' || b == '\t' {
+			result = append(result, b)
+		}
+	}
+	return string(result)
+}
+
+// validateAPIPath checks a relative API path for dangerous characters that
+// could indicate a hallucinated or malicious resource ID. Full URLs (pagination
+// cursors) are skipped — they are validated separately by validateNextURL.
+//
+// The check operates on path segments only (before any query string) and rejects:
+//   - control characters (< 0x20, DEL)
+//   - pre-encoded percent sequences (%) that would cause double-encoding
+//   - fragment markers (#) that truncate the URL
+//   - backslashes that may be misinterpreted across platforms
+//   - path traversal segments (.. or empty segments //)
+func validateAPIPath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return nil
+	}
+
+	pathOnly := path
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		pathOnly = path[:idx]
+	}
+
+	for _, r := range pathOnly {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("API path contains control character: %q", path)
+		}
+	}
+
+	if strings.ContainsAny(pathOnly, "#%\\") {
+		return fmt.Errorf("API path contains unsafe character (#, %%, or \\): %q", path)
+	}
+
+	if strings.Contains(pathOnly, "//") {
+		return fmt.Errorf("API path contains empty segment (//): %q", path)
+	}
+
+	for _, segment := range strings.Split(pathOnly, "/") {
+		if segment == ".." {
+			return fmt.Errorf("API path contains traversal segment: %q", path)
+		}
+	}
+
+	return nil
+}
+
+// IsNotFound checks if the error is a "not found" error
+func IsNotFound(err error) bool {
+	return errors.Is(err, ErrNotFound)
+}
+
+// IsUnauthorized checks if the error is an "unauthorized" error
+func IsUnauthorized(err error) bool {
+	return errors.Is(err, ErrUnauthorized)
+}

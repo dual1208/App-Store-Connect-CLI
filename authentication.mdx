@@ -1,0 +1,45 @@
+# Authentication
+
+> Use App Store Connect API keys from private files or process environment variables.
+
+Create an App Store Connect API key in **Users and Access → Integrations**, download the `.p8` key once, and keep it outside source control.
+
+## Store a named profile
+
+```bash
+chmod 600 /secure/path/AuthKey.p8
+asc auth login \
+  --name work \
+  --key-id ABC123DEFG \
+  --issuer-id 12345678-abcd-1234-abcd-123456789012 \
+  --private-key /secure/path/AuthKey.p8
+```
+
+Profiles are written to `~/.asc/config.json`. The directory is restricted to mode `0700`; the config and private key must be regular, current-user-owned, single-link files with mode `0600`.
+
+Use `--local` to write `./.asc/config.json` for a repository-scoped profile. Never commit that directory or the `.p8` file.
+
+## Environment-only authentication
+
+```bash
+export ASC_KEY_ID=ABC123DEFG
+export ASC_ISSUER_ID=12345678-abcd-1234-abcd-123456789012
+export ASC_PRIVATE_KEY_PATH=/secure/path/AuthKey.p8
+```
+
+`ASC_PRIVATE_KEY` and `ASC_PRIVATE_KEY_B64` are also supported for ephemeral CI jobs. Prefer secret-file injection when the CI provider supports it, and never place secrets in command-line arguments or logs.
+
+## Inspect and switch profiles
+
+```bash
+asc auth status
+asc auth switch --name work
+asc auth doctor
+asc auth token --confirm
+```
+
+Credential resolution is: an explicitly selected file profile, the default file profile, then complete environment credentials. `ASC_STRICT_AUTH=true` rejects mixed complete sources.
+
+## Web-session files
+
+Web login cookies and optional Apple Account passwords are stored only in private files beneath `~/.asc/`. Set `ASC_WEB_SESSION_CACHE=0` to disable session persistence or `ASC_WEB_DONT_STORE_PASSWORD=1` to disable password persistence.

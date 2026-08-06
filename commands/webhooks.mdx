@@ -1,0 +1,36 @@
+# webhooks
+
+> Manage App Store Connect webhooks
+
+The `webhooks` command manages webhook resources and delivery records through
+App Store Connect. It does not run a local network listener or execute event
+payloads.
+
+## Webhook CRUD
+
+```bash
+asc webhooks list --app "APP_ID"
+asc webhooks view --webhook-id "WEBHOOK_ID"
+asc webhooks create \
+  --app "APP_ID" \
+  --name "Build Updates" \
+  --url "https://example.com/webhook" \
+  --secret "WEBHOOK_SECRET" \
+  --events "SUBSCRIPTION.CREATED,SUBSCRIPTION.UPDATED" \
+  --enabled true
+asc webhooks update --webhook-id "WEBHOOK_ID" --enabled false
+asc webhooks delete --webhook-id "WEBHOOK_ID" --confirm
+```
+
+## Deliveries and ping
+
+```bash
+asc webhooks deliveries --webhook-id "WEBHOOK_ID" --created-after "2026-01-01T00:00:00Z"
+asc webhooks deliveries links --webhook-id "WEBHOOK_ID"
+asc webhooks deliveries redeliver --delivery-id "DELIVERY_ID"
+asc webhooks ping --webhook-id "WEBHOOK_ID"
+```
+
+Use `--paginate` to aggregate every page and `--output json` for automation.
+Webhook secrets are sent only to App Store Connect and must not be committed to
+the repository or printed in logs.

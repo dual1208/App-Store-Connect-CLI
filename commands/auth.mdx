@@ -1,0 +1,32 @@
+# Authentication Commands
+
+> Manage file-backed App Store Connect API credentials.
+
+## `asc auth login`
+
+Validate and save a named credential profile:
+
+```bash
+asc auth login --name work --key-id ABC123DEFG \
+  --issuer-id 12345678-abcd-1234-abcd-123456789012 \
+  --private-key /secure/path/AuthKey.p8
+```
+
+Use `--local` for `./.asc/config.json`, `--key-type individual` for an individual API key, and `--skip-validation` only when offline validation is intentionally unavailable.
+
+## Profile operations
+
+```bash
+asc auth status --output json
+asc auth switch --name work
+asc auth logout --name work
+```
+
+## Diagnostics and token generation
+
+```bash
+asc auth doctor
+asc auth token --confirm
+```
+
+The credential directory must be mode `0700`. Credential config and private-key files must be ordinary, current-user-owned, single-link files with mode `0600`.

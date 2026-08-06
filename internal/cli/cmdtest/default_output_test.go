@@ -1,0 +1,118 @@
+package cmdtest
+
+import (
+	"io"
+	"testing"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
+)
+
+func resetDefaultOutput(t *testing.T) {
+	t.Helper()
+	shared.ResetDefaultOutputFormat()
+	t.Cleanup(shared.ResetDefaultOutputFormat)
+}
+
+func findCommand(root *ffcli.Command, path ...string) *ffcli.Command {
+	cmd := root
+	for _, name := range path {
+		var next *ffcli.Command
+		for _, sub := range cmd.Subcommands {
+			if sub.Name == name {
+				next = sub
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		cmd = next
+	}
+	return cmd
+}
+
+func TestDefaultOutputEnvSetsFlagDefault(t *testing.T) {
+	resetDefaultOutput(t)
+	t.Setenv("ASC_DEFAULT_OUTPUT", "table")
+
+	root := RootCommand("1.2.3")
+	cmd := findCommand(root, "categories", "list")
+	if cmd == nil {
+		t.Fatal("expected categories list command")
+		return
+	}
+
+	outputFlag := cmd.FlagSet.Lookup("output")
+	if outputFlag == nil {
+		t.Fatal("expected --output flag")
+		return
+	}
+	if got := outputFlag.DefValue; got != "table" {
+		t.Fatalf("expected default output to be table, got %q", got)
+	}
+}
+
+func TestDefaultOutputEnvOverriddenByExplicitFlag(t *testing.T) {
+	resetDefaultOutput(t)
+	t.Setenv("ASC_DEFAULT_OUTPUT", "table")
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+	if err := root.Parse([]string{"categories", "list", "--output", "json"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	cmd := findCommand(root, "categories", "list")
+	if cmd == nil {
+		t.Fatal("expected categories list command")
+		return
+	}
+
+	outputFlag := cmd.FlagSet.Lookup("output")
+	if outputFlag == nil {
+		t.Fatal("expected --output flag")
+		return
+	}
+	if got := outputFlag.Value.String(); got != "json" {
+		t.Fatalf("expected parsed output to be json, got %q", got)
+	}
+}
+
+func TestDefaultOutputEnvIsReevaluatedAcrossRootCommandBuilds(t *testing.T) {
+	resetDefaultOutput(t)
+	t.Setenv("ASC_DEFAULT_OUTPUT", "table")
+
+	firstRoot := RootCommand("1.2.3")
+	firstCmd := findCommand(firstRoot, "categories", "list")
+	if firstCmd == nil {
+		t.Fatal("expected categories list command")
+		return
+	}
+	firstOutputFlag := firstCmd.FlagSet.Lookup("output")
+	if firstOutputFlag == nil {
+		t.Fatal("expected --output flag on first root")
+		return
+	}
+	if got := firstOutputFlag.DefValue; got != "table" {
+		t.Fatalf("expected first default output to be table, got %q", got)
+	}
+
+	t.Setenv("ASC_DEFAULT_OUTPUT", "json")
+
+	secondRoot := RootCommand("1.2.3")
+	secondCmd := findCommand(secondRoot, "categories", "list")
+	if secondCmd == nil {
+		t.Fatal("expected categories list command on rebuilt root")
+		return
+	}
+	secondOutputFlag := secondCmd.FlagSet.Lookup("output")
+	if secondOutputFlag == nil {
+		t.Fatal("expected --output flag on rebuilt root")
+		return
+	}
+	if got := secondOutputFlag.DefValue; got != "json" {
+		t.Fatalf("expected rebuilt root default output to be json, got %q", got)
+	}
+}

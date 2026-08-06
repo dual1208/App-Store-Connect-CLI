@@ -1,0 +1,300 @@
+# Apps
+
+> List and manage apps in App Store Connect
+
+## Overview
+
+The `apps` command is the main app-management surface for App Store Connect.
+
+App creation no longer lives under `asc apps` in 1.0. Use `asc web apps create`
+for the web-session creation flow, and see the
+[Migrate to 1.0](/migrate-to-1-0) guide if you are updating older scripts.
+
+## Commands
+
+### `asc apps list`
+
+List apps from App Store Connect.
+
+<ParamField path="--bundle-id" type="string">
+  Filter by bundle ID(s), comma-separated
+</ParamField>
+
+<ParamField path="--name" type="string">
+  Filter by app name(s), comma-separated
+</ParamField>
+
+<ParamField path="--sku" type="string">
+  Filter by SKU(s), comma-separated
+</ParamField>
+
+<ParamField path="--sort" type="string">
+  Sort by: `name`, `-name`, `bundleId`, `-bundleId`
+</ParamField>
+
+<ParamField path="--limit" type="integer">
+  Maximum results per page (1-200)
+</ParamField>
+
+<ParamField path="--next" type="string">
+  Fetch next page using a links.next URL
+</ParamField>
+
+<ParamField path="--paginate" type="boolean" default="false">
+  Automatically fetch all pages (aggregate results)
+</ParamField>
+
+<ParamField path="--app-info-fields" type="string">
+  Sparse fields for included app-info records. API 4.4.1 supports the deprecated
+  `kidsAgeBand` selector. Supplying this flag automatically includes `appInfos`.
+  Prefer `asc age-rating view` for current age-rating data.
+</ParamField>
+
+<ParamField path="--iap-fields" type="string">
+  Sparse fields for included in-app purchases. API 4.4.1 supports `versions`.
+  Supplying this flag automatically includes `inAppPurchases`.
+</ParamField>
+
+<ParamField path="--subscription-group-fields" type="string">
+  Sparse fields for included subscription groups. API 4.4.1 supports
+  `versions`. Supplying this flag automatically includes `subscriptionGroups`.
+</ParamField>
+
+<ParamField path="--output" type="string" default="json">
+  Output format: `json`, `table`, `markdown`
+</ParamField>
+
+**Examples:**
+
+```bash  theme={null}
+asc apps list
+asc apps list --bundle-id "com.example.app"
+asc apps list --name "My App"
+asc apps list --limit 10
+asc apps list --sort name
+asc apps list --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
+asc apps list --output table
+asc apps list --paginate
+```
+
+**Response:**
+
+```json  theme={null}
+{
+  "data": [
+    {
+      "id": "123456789",
+      "type": "apps",
+      "attributes": {
+        "name": "My App",
+        "bundleId": "com.example.app",
+        "sku": "MYAPP123",
+        "primaryLocale": "en-US"
+      }
+    }
+  ],
+  "links": {
+    "self": "https://api.appstoreconnect.apple.com/v1/apps?limit=10"
+  }
+}
+```
+
+***
+
+### `asc apps view`
+
+View app details by ID.
+
+<ParamField path="--id" type="string" required>
+  App Store Connect app ID
+</ParamField>
+
+<ParamField path="--app-info-fields" type="string">
+  Sparse fields for included app-info records: the deprecated `kidsAgeBand`
+  selector. Automatically includes `appInfos`; prefer `asc age-rating view`.
+</ParamField>
+
+<ParamField path="--iap-fields" type="string">
+  Sparse fields for included in-app purchases: `versions`. Automatically
+  includes `inAppPurchases`.
+</ParamField>
+
+<ParamField path="--subscription-group-fields" type="string">
+  Sparse fields for included subscription groups: `versions`. Automatically
+  includes `subscriptionGroups`.
+</ParamField>
+
+<ParamField path="--output" type="string" default="json">
+  Output format: `json`, `table`
+</ParamField>
+
+**Examples:**
+
+```bash  theme={null}
+asc apps view --id "APP_ID"
+asc apps view --id "APP_ID" --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
+asc apps view --id "APP_ID" --output table
+```
+
+**Response:**
+
+```json  theme={null}
+{
+  "data": {
+    "id": "APP_ID",
+    "type": "apps",
+    "attributes": {
+      "name": "My App",
+      "bundleId": "com.example.app",
+      "sku": "MYAPP123",
+      "primaryLocale": "en-US",
+      "contentRightsDeclaration": "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+    }
+  }
+}
+```
+
+***
+
+### `asc apps info list`
+
+List app-info records for an app. API 4.4.1 adds sparse reads for the app info
+kids age band and the age-rating declaration's social-media fields.
+
+<ParamField path="--app" type="string" required>
+  App Store Connect app ID (or `ASC_APP_ID`)
+</ParamField>
+
+<ParamField path="--fields" type="string">
+  Sparse app-info fields: `kidsAgeBand`. Apple marks this selector deprecated;
+  prefer `asc age-rating view` for current age-rating data.
+</ParamField>
+
+<ParamField path="--age-rating-fields" type="string">
+  Sparse fields for the included age-rating declaration:
+  `socialMedia`, `socialMediaAgeRestricted`. Automatically includes
+  `ageRatingDeclaration`.
+</ParamField>
+
+```bash  theme={null}
+asc apps info list --app "APP_ID" --fields kidsAgeBand
+asc apps info list --app "APP_ID" --age-rating-fields socialMedia,socialMediaAgeRestricted
+```
+
+<Note>
+  Apple's production API accepted the API 4.4.1 social-media fields in live
+  testing on July 17, 2026, but still rejected the official
+  `fields[appInfos]=kidsAgeBand` value on app-info detail and collection reads.
+  The CLI exposes the published schema while Apple's rollout catches up.
+</Note>
+
+<Warning>
+  `kidsAgeBand` remains available because it is present in the official API
+  4.4.1 sparse-field enum, but Apple marks it deprecated. New workflows should
+  read the age-rating declaration with `asc age-rating view`; use its `--fields`
+  flag for the API 4.4.1 social-media fields.
+</Warning>
+
+### `asc apps info view`
+
+Use an app-info ID to request the same sparse fields from one record. These
+app-info flags cannot be combined with version-localization selectors such as
+`--version-id`, `--locale`, `--next`, or `--paginate`.
+
+```bash  theme={null}
+asc apps info view --info-id "APP_INFO_ID" --fields kidsAgeBand
+asc apps info view --info-id "APP_INFO_ID" --age-rating-fields socialMedia,socialMediaAgeRestricted
+```
+
+***
+
+### `asc apps update`
+
+Update an app's bundle ID, primary locale, or content rights declaration.
+
+<ParamField path="--id" type="string" required>
+  App Store Connect app ID
+</ParamField>
+
+<ParamField path="--bundle-id" type="string">
+  Update bundle ID
+</ParamField>
+
+<ParamField path="--primary-locale" type="string">
+  Update primary locale (e.g., en-US)
+</ParamField>
+
+<ParamField path="--content-rights" type="string">
+  Content rights declaration: `DOES_NOT_USE_THIRD_PARTY_CONTENT` or `USES_THIRD_PARTY_CONTENT`
+</ParamField>
+
+**Examples:**
+
+```bash  theme={null}
+asc apps update --id "APP_ID" --bundle-id "com.example.app"
+asc apps update --id "APP_ID" --primary-locale "en-US"
+asc apps update --id "APP_ID" --content-rights "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+```
+
+**Response:**
+
+```json  theme={null}
+{
+  "data": {
+    "id": "APP_ID",
+    "type": "apps",
+    "attributes": {
+      "bundleId": "com.example.app",
+      "primaryLocale": "en-US",
+      "contentRightsDeclaration": "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+    }
+  }
+}
+```
+
+***
+
+## Other App Surfaces
+
+The `apps` family also includes several app-scoped surfaces that are not fully
+expanded on this page yet:
+
+* `asc apps ci-product` - View the CI product for an app
+* `asc apps remove-beta-testers` - Remove beta testers from an app
+* `asc apps subscription-grace-period` - Inspect an app's subscription grace period
+* `asc apps search-keywords` - Manage raw search-keyword relationships
+* `asc apps app-encryption-declarations` - List app encryption declarations
+* `asc apps content-rights` - Manage content-rights declarations
+
+Use `asc apps --help` and `asc apps <subcommand> --help` to inspect the current
+surface before scripting against a specific app workflow.
+
+## Common Usage Patterns
+
+### List all apps and filter by bundle ID
+
+```bash  theme={null}
+asc apps list --bundle-id "com.example.app" --output table
+```
+
+### Create an app with the web flow
+
+```bash  theme={null}
+asc web apps create --name "My App" --bundle-id "com.example.myapp" --sku "MYAPP123" --apple-id "user@example.com"
+```
+
+### View app details
+
+```bash  theme={null}
+asc apps view --id "123456789" --output json
+```
+
+### Update app metadata
+
+```bash  theme={null}
+asc apps update --id "123456789" --primary-locale "en-GB"
+```
+
+## Environment Variables
+
+* `ASC_APP_ID` - Default app ID for commands that require `--app`

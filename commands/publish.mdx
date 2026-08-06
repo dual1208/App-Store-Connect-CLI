@@ -1,0 +1,173 @@
+# publish
+
+> High-level publish workflows for TestFlight and App Store
+
+The `publish` command is the high-level publishing surface for TestFlight and
+the canonical App Store upload + submit flow.
+
+## Usage
+
+```bash  theme={null}
+asc publish <workflow> [flags]
+```
+
+## Canonical paths
+
+Use these top-level workflows deliberately:
+
+* `asc publish testflight` - canonical high-level TestFlight publish path
+* `asc publish appstore` - canonical high-level App Store publish path
+* `asc release stage` - prepare an App Store version without submitting it
+
+In 1.0, the deprecated `asc release run` path was removed. Use
+[Migrate to 1.0](/migrate-to-1-0) if you still have older automation that
+expects a single deprecated release command.
+
+## Workflows
+
+### TestFlight workflow
+
+Upload and distribute to TestFlight:
+
+```bash  theme={null}
+asc publish testflight \
+  --app APP_ID \
+  --ipa /path/to/MyApp.ipa \
+  --group "External Testers"
+```
+
+This workflow:
+
+1. Uploads the build
+2. Waits for processing
+3. Distributes to specified beta groups
+
+### App Store workflow
+
+Ship to the App Store with the canonical publish command:
+
+```bash  theme={null}
+asc publish appstore \
+  --app APP_ID \
+  --ipa /path/to/MyApp.ipa \
+  --version 1.2.0 \
+  --submit \
+  --confirm
+```
+
+This workflow:
+
+1. Uploads the IPA
+2. Finds or creates the matching App Store version
+3. Attaches the processed build
+4. Optionally submits for review with `--submit`
+5. Prints the resulting build/version/submission identifiers
+
+## TestFlight flags
+
+<ParamField path="--app" type="string" required>
+  App ID for the build
+</ParamField>
+
+<ParamField path="--file" type="string" required>
+  Path to IPA file
+</ParamField>
+
+<ParamField path="--groups" type="string">
+  Comma-separated beta group names or IDs
+
+  Example: `"External Testers,Internal Team"`
+</ParamField>
+
+<ParamField path="--wait" type="boolean">
+  Wait for build processing to complete
+
+  Default: `true`
+</ParamField>
+
+## 1.0 migration note
+
+If older automation still invokes the deprecated `asc release run`, replace it with
+`asc publish appstore --submit --confirm` for end-to-end shipping or
+`asc release stage` for pre-submit preparation work.
+
+## Example workflows
+
+### Publish to TestFlight
+
+```bash  theme={null}
+asc publish testflight \
+  --app 123456789 \
+  --ipa build/MyApp.ipa \
+  --group "External Testers,Beta Team"
+```
+
+### Publish to App Store
+
+```bash  theme={null}
+asc publish appstore \
+  --app 123456789 \
+  --ipa build/MyApp.ipa \
+  --version 1.2.0 \
+  --submit \
+  --confirm
+```
+
+### CI/CD integration
+
+```yaml  theme={null}
+# GitHub Actions
+- name: Publish to TestFlight
+  env:
+    ASC_APP_ID: ${{ secrets.APP_ID }}
+  run: |
+    asc publish testflight \
+      --app "$ASC_APP_ID" \
+      --ipa MyApp.ipa \
+      --group "External Testers"
+```
+
+## Output
+
+```
+Uploading build...
+Build uploaded successfully
+Waiting for processing...
+Build processed (VALID)
+Distributing to beta groups...
+Build distributed to External Testers
+
+Publish complete!
+Build ID: build-id-here
+```
+
+## Error handling
+
+If any step fails, the workflow stops and reports the error:
+
+```
+Upload failed: Invalid IPA file
+```
+
+You can retry individual steps using the lower-level commands:
+
+```bash  theme={null}
+asc builds upload --app 123456789 --ipa MyApp.ipa
+asc builds add-groups --build-id BUILD_ID --group "External Testers"
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Builds command" icon="box" href="/commands/builds">
+    Manage builds and uploads
+  </Card>
+
+  <Card title="Release command" icon="rocket" href="/commands/release">
+    Pre-submit release staging
+  </Card>
+
+  <Card title="Automation guide" icon="robot" href="/guides/automation">
+    Workflow automation patterns
+  </Card>
+</CardGroup>

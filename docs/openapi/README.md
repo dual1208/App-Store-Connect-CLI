@@ -1,0 +1,28 @@
+# OpenAPI snapshot (offline)
+
+This folder keeps an offline snapshot of the App Store Connect OpenAPI spec for
+offline consumers that cannot access the internet.
+
+## Files
+
+- `latest.json`: full OpenAPI spec snapshot (see source below)
+- `paths.txt`: generated path+method index for quick existence checks
+
+## Source
+
+Preferred sources for the OpenAPI spec:
+
+- Official Apple download (zip): `https://developer.apple.com/sample-code/app-store-connect/app-store-connect-openapi-specification.zip`
+
+Note: The published OpenAPI spec can lag reality and may omit some operations that
+still work in the API (parity checks can surface these gaps).
+
+## Update process
+
+1. Replace `latest.json` with a newer spec file.
+2. Run `make update-openapi` to regenerate `paths.txt`.
+3. Run `make update-schema-index` to regenerate the runtime `asc schema` index.
+4. Run `make check-docs` to verify both generated indexes are current.
+5. Update the "Last synced" date below and commit the snapshot and indexes together.
+
+Last synced: 2026-07-16

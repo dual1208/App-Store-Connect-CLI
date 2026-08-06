@@ -1,0 +1,175 @@
+package shared
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+)
+
+// ReportedError marks an error as already reported to the user.
+// The main entrypoint should exit non-zero without duplicating output.
+type ReportedError interface {
+	error
+	Reported() bool
+}
+
+// ValidationFailure marks an error as a command/domain validation result rather
+// than a generic runtime failure. It intentionally carries no command-specific
+// value so callers can classify the validation stage reliably.
+type ValidationFailure interface {
+	error
+	ValidationFailure() bool
+}
+
+type reportedError struct {
+	err error
+}
+
+type validationError struct {
+	err error
+}
+
+type errorWithCause struct {
+	err   error
+	cause error
+}
+
+type UsageErrorKind string
+
+const (
+	UsageErrorMissingRequired UsageErrorKind = "missing_required"
+	UsageErrorInvalidValue    UsageErrorKind = "invalid_value"
+	UsageErrorOther           UsageErrorKind = "other"
+)
+
+type classifiedUsageError struct {
+	kind    UsageErrorKind
+	message string
+}
+
+func (e classifiedUsageError) Error() string {
+	if e.message == "" {
+		return flag.ErrHelp.Error()
+	}
+	return e.message
+}
+func (e classifiedUsageError) Unwrap() error { return flag.ErrHelp }
+
+func (e reportedError) Error() string {
+	return e.err.Error()
+}
+
+func (e reportedError) Unwrap() error {
+	return e.err
+}
+
+func (e reportedError) Reported() bool {
+	return true
+}
+
+func (e validationError) Error() string {
+	return e.err.Error()
+}
+
+func (e validationError) Unwrap() error {
+	return e.err
+}
+
+func (e validationError) ValidationFailure() bool {
+	return true
+}
+
+func (e errorWithCause) Error() string {
+	return e.err.Error()
+}
+
+func (e errorWithCause) Unwrap() []error {
+	return []error{e.err, e.cause}
+}
+
+// NewReportedError wraps an error that has already been printed.
+func NewReportedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return reportedError{err: err}
+}
+
+// NewValidationError wraps an error that represents local/domain validation.
+func NewValidationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return validationError{err: err}
+}
+
+// NewValidationReportedError wraps an already printed validation result.
+func NewValidationReportedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return NewReportedError(NewValidationError(err))
+}
+
+// NewErrorWithCause preserves err's rendered message and classification while
+// retaining an additional cause for errors.Is/errors.As.
+func NewErrorWithCause(err, cause error) error {
+	if err == nil {
+		return cause
+	}
+	if cause == nil {
+		return err
+	}
+	return errorWithCause{err: err, cause: cause}
+}
+
+func IsValidationError(err error) bool {
+	var validationErr ValidationFailure
+	return errors.As(err, &validationErr) && validationErr.ValidationFailure()
+}
+
+// UsageError prints a CLI validation error and returns flag.ErrHelp so callers
+// map the failure to usage exit code semantics.
+func UsageError(message string) error {
+	trimmed := strings.TrimSpace(message)
+	if trimmed != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", trimmed)
+	}
+	return classifiedUsageError{kind: classifyUsageMessage(trimmed), message: trimmed}
+}
+
+// UsageErrorf formats and returns a usage-class validation error.
+func UsageErrorf(format string, args ...any) error {
+	return UsageError(fmt.Sprintf(format, args...))
+}
+
+// MissingRequiredUsageError classifies a required-input failure after the
+// command has already written its diagnostic to stderr.
+func MissingRequiredUsageError(parameters ...string) error {
+	parameter := ""
+	if len(parameters) > 0 {
+		parameter = strings.TrimSpace(parameters[0])
+	}
+	return classifiedUsageError{kind: UsageErrorMissingRequired, message: parameter}
+}
+
+func ClassifyUsageError(err error) UsageErrorKind {
+	var classified classifiedUsageError
+	if errors.As(err, &classified) {
+		return classified.kind
+	}
+	return ""
+}
+
+func classifyUsageMessage(message string) UsageErrorKind {
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "required") {
+		return UsageErrorMissingRequired
+	}
+	if strings.Contains(lower, "invalid") || strings.Contains(lower, "unsupported") || strings.Contains(lower, "must be") {
+		return UsageErrorInvalidValue
+	}
+	return UsageErrorOther
+}

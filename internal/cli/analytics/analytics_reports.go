@@ -1,0 +1,157 @@
+package analytics
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
+	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
+)
+
+// AnalyticsReportsCommand returns the analytics reports command group.
+func AnalyticsReportsCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("reports", flag.ExitOnError)
+
+	return &ffcli.Command{
+		Name:       "reports",
+		ShortUsage: "asc analytics reports <subcommand> [flags]",
+		ShortHelp:  "Get analytics reports by ID or relationships.",
+		LongHelp: `Get analytics reports by ID or relationships.
+
+Examples:
+  asc analytics reports view --report-id "REPORT_ID"
+  asc analytics reports links --report-id "REPORT_ID"
+  asc analytics reports links --report-id "REPORT_ID" --paginate`,
+		FlagSet:   fs,
+		UsageFunc: shared.VisibleUsageFunc,
+		Subcommands: []*ffcli.Command{
+			AnalyticsReportsGetCommand(),
+			AnalyticsReportsRelationshipsCommand(),
+		},
+		Exec: func(ctx context.Context, args []string) error {
+			return flag.ErrHelp
+		},
+	}
+}
+
+// AnalyticsReportsGetCommand retrieves a specific analytics report.
+func AnalyticsReportsGetCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("view", flag.ExitOnError)
+
+	reportID := fs.String("report-id", "", "Analytics report ID")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "view",
+		ShortUsage: "asc analytics reports view --report-id \"REPORT_ID\" [flags]",
+		ShortHelp:  "View an analytics report by ID.",
+		LongHelp: `View an analytics report by ID.
+
+Examples:
+  asc analytics reports view --report-id "REPORT_ID"`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if strings.TrimSpace(*reportID) == "" {
+				fmt.Fprintln(os.Stderr, "Error: --report-id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("analytics reports view: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			resp, err := client.GetAnalyticsReport(requestCtx, strings.TrimSpace(*reportID))
+			if err != nil {
+				return fmt.Errorf("analytics reports view: failed to fetch: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}
+
+// AnalyticsReportsRelationshipsCommand lists instance links for a report.
+func AnalyticsReportsRelationshipsCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("links", flag.ExitOnError)
+
+	reportID := fs.String("report-id", "", "Analytics report ID")
+	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
+	next := fs.String("next", "", "Fetch next page using a links.next URL")
+	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "links",
+		ShortUsage: "asc analytics reports links --report-id \"REPORT_ID\" [flags]",
+		ShortHelp:  "List analytics report instance relationships.",
+		LongHelp: `List analytics report instance relationships.
+
+Examples:
+  asc analytics reports links --report-id "REPORT_ID"
+  asc analytics reports links --report-id "REPORT_ID" --paginate`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if *limit != 0 && (*limit < 1 || *limit > analyticsMaxLimit) {
+				return fmt.Errorf("analytics reports links: --limit must be between 1 and 200")
+			}
+			if err := shared.ValidateNextURL(*next); err != nil {
+				return fmt.Errorf("analytics reports links: %w", err)
+			}
+
+			id := strings.TrimSpace(*reportID)
+			if id == "" && strings.TrimSpace(*next) == "" {
+				fmt.Fprintln(os.Stderr, "Error: --report-id is required")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("analytics reports links: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			opts := []asc.LinkagesOption{
+				asc.WithLinkagesLimit(*limit),
+				asc.WithLinkagesNextURL(*next),
+			}
+
+			if *paginate {
+				paginateOpts := append(opts, asc.WithLinkagesLimit(analyticsMaxLimit))
+				resp, err := shared.PaginateWithSpinner(
+					requestCtx,
+					func(ctx context.Context) (asc.PaginatedResponse, error) {
+						return client.GetAnalyticsReportInstancesRelationships(ctx, id, paginateOpts...)
+					},
+					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+						return client.GetAnalyticsReportInstancesRelationships(ctx, id, asc.WithLinkagesNextURL(nextURL))
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("analytics reports links: %w", err)
+				}
+
+				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			}
+
+			resp, err := client.GetAnalyticsReportInstancesRelationships(requestCtx, id, opts...)
+			if err != nil {
+				return fmt.Errorf("analytics reports links: failed to fetch: %w", err)
+			}
+
+			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+		},
+	}
+}

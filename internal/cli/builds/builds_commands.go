@@ -1,0 +1,884 @@
+package builds
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/dual1208/App-Store-Connect-CLI/internal/asc"
+	"github.com/dual1208/App-Store-Connect-CLI/internal/cli/shared"
+)
+
+const (
+	buildWaitDefaultTimeout = 30 * time.Minute
+)
+
+// BuildsUploadCommand returns a command to upload a build
+func BuildsUploadCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("upload", flag.ExitOnError)
+
+	appID := fs.String("app", "", "App Store Connect app ID; IPA uploads also accept an exact bundle ID or exact name (required, or ASC_APP_ID env)")
+	ipaPath := fs.String("ipa", "", "Path to .ipa file (for iOS, tvOS, visionOS apps)")
+	pkgPath := fs.String("pkg", "", "Path to .pkg file (for macOS apps)")
+	version := fs.String("version", "", "CFBundleShortVersionString (e.g., 1.0.0, auto-extracted from IPA if not provided)")
+	buildNumber := fs.String("build-number", "", "CFBundleVersion (e.g., 123, auto-extracted from IPA if not provided)")
+	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS (auto-detected for --pkg)")
+	dryRun := fs.Bool("dry-run", false, "Reserve upload operations without uploading the file")
+	concurrency := fs.Int("concurrency", asc.DefaultUploadConcurrency, "Upload concurrency")
+	verifyChecksum := fs.Bool("checksum", false, "Verify upload checksums if provided by API")
+	testNotes := fs.String("test-notes", "", "What to Test notes (requires build processing)")
+	locale := fs.String("locale", "", "Locale for --test-notes (e.g., en-US)")
+	wait := fs.Bool("wait", false, "Wait for build processing to complete")
+	pollInterval := fs.Duration("poll-interval", shared.PublishDefaultPollInterval, "Polling interval for --wait and --test-notes")
+	verifyTimeout := fs.Duration("verify-timeout", 0, "How long to watch for immediate post-commit upload failures (0 to disable)")
+	output := shared.BindOutputFlags(fs)
+	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
+
+	return &ffcli.Command{
+		Name:       "upload",
+		ShortUsage: "asc builds upload [flags]",
+		ShortHelp:  "Upload a build to App Store Connect.",
+		LongHelp: `Upload a build to App Store Connect.
+
+By default, this command uploads the IPA/PKG to the presigned URLs and commits
+the file immediately. Use --verify-timeout to briefly watch for immediate
+post-commit processing failures, or --wait for full build discovery and
+processing.
+Use --dry-run to only reserve the upload operations.
+Presigned URLs and request-header values are redacted from output by default.
+Pass --include-sensitive only when another tool must consume those capabilities.
+
+Use --ipa for iOS, tvOS, and visionOS apps. Use --pkg for macOS apps.
+When using --pkg, the platform is automatically set to MAC_OS.
+
+Examples:
+  asc builds upload --app "123456789" --ipa "path/to/app.ipa"
+  asc builds upload --ipa "app.ipa" --version "1.0.0" --build-number "123"
+  asc builds upload --app "123456789" --ipa "app.ipa" --dry-run
+  asc builds upload --app "123456789" --ipa "app.ipa" --dry-run --include-sensitive
+  asc builds upload --app "123456789" --ipa "app.ipa" --test-notes "Test flow" --locale "en-US" --wait
+  asc builds upload --app "123456789" --pkg "path/to/app.pkg" --version "1.0.0" --build-number "123"`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			// Validate required flags
+			resolvedAppID := shared.ResolveAppID(*appID)
+			if resolvedAppID == "" {
+				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
+				return shared.MissingRequiredUsageError()
+			}
+
+			// Validate that exactly one of --ipa or --pkg is provided
+			hasIPA := *ipaPath != ""
+			hasPKG := *pkgPath != ""
+			if !hasIPA && !hasPKG {
+				fmt.Fprintf(os.Stderr, "Error: --ipa or --pkg is required\n\n")
+				return shared.MissingRequiredUsageError()
+			}
+			if hasIPA && hasPKG {
+				fmt.Fprintf(os.Stderr, "Error: --ipa and --pkg are mutually exclusive\n\n")
+				return flag.ErrHelp
+			}
+			if *verifyTimeout < 0 {
+				return shared.UsageError("--verify-timeout must be zero or greater")
+			}
+			if *dryRun && *verifyTimeout > 0 {
+				return shared.UsageError("--verify-timeout is not supported with --dry-run")
+			}
+
+			// Determine file path and UTI based on provided flag
+			var filePath string
+			var fileUTI asc.UTI
+			if hasIPA {
+				filePath = *ipaPath
+				fileUTI = asc.UTIIPA
+			} else {
+				filePath = *pkgPath
+				fileUTI = asc.UTIPKG
+			}
+
+			// Validate file exists
+			var (
+				fileInfo os.FileInfo
+				err      error
+			)
+			if hasIPA {
+				fileInfo, err = shared.ValidateIPAPath(filePath)
+				if err != nil {
+					return fmt.Errorf("builds upload: %w", err)
+				}
+			} else {
+				fileInfo, err = os.Stat(filePath)
+				if err != nil {
+					return fmt.Errorf("builds upload: failed to stat PKG: %w", err)
+				}
+				if fileInfo.IsDir() {
+					return fmt.Errorf("builds upload: --pkg must be a file")
+				}
+			}
+
+			// Determine platform
+			var platformValue asc.Platform
+			if hasPKG {
+				// For PKG files, platform must be MAC_OS
+				if *platform != "" && strings.ToUpper(*platform) != "MAC_OS" {
+					return fmt.Errorf("builds upload: --pkg requires --platform MAC_OS (or omit --platform)")
+				}
+				platformValue = asc.PlatformMacOS
+			} else {
+				// For IPA files, default to IOS if not specified
+				platformStr := strings.ToUpper(*platform)
+				if platformStr == "" {
+					platformStr = "IOS"
+				}
+				platformValue = asc.Platform(platformStr)
+			}
+
+			// Validate platform
+			switch platformValue {
+			case asc.PlatformIOS, asc.PlatformMacOS, asc.PlatformTVOS, asc.PlatformVisionOS:
+			default:
+				return fmt.Errorf("builds upload: --platform must be IOS, MAC_OS, TV_OS, or VISION_OS")
+			}
+			concurrencySet := false
+			fs.Visit(func(f *flag.Flag) {
+				if f.Name == "concurrency" {
+					concurrencySet = true
+				}
+			})
+			if *dryRun {
+				if concurrencySet {
+					return fmt.Errorf("builds upload: --concurrency is not supported with --dry-run")
+				}
+				if *verifyChecksum {
+					return fmt.Errorf("builds upload: --checksum is not supported with --dry-run")
+				}
+				if *wait {
+					return fmt.Errorf("builds upload: --wait is not supported with --dry-run")
+				}
+			} else if *concurrency < 1 {
+				return fmt.Errorf("builds upload: --concurrency must be at least 1")
+			}
+
+			testNotesValue := strings.TrimSpace(*testNotes)
+			localeValue := strings.TrimSpace(*locale)
+			if testNotesValue != "" && localeValue == "" {
+				fmt.Fprintln(os.Stderr, "Error: --locale is required with --test-notes")
+				return shared.MissingRequiredUsageError()
+			}
+			if testNotesValue == "" && localeValue != "" {
+				fmt.Fprintln(os.Stderr, "Error: --test-notes is required with --locale")
+				return shared.MissingRequiredUsageError()
+			}
+			if testNotesValue != "" {
+				if *dryRun {
+					return fmt.Errorf("builds upload: --test-notes is not supported with --dry-run")
+				}
+				if err := shared.ValidateBuildLocalizationLocale(localeValue); err != nil {
+					return fmt.Errorf("builds upload: %w", err)
+				}
+			}
+			if (*wait || testNotesValue != "") && *pollInterval <= 0 {
+				return fmt.Errorf("builds upload: --poll-interval must be greater than 0")
+			}
+
+			versionValue := strings.TrimSpace(*version)
+			buildNumberValue := strings.TrimSpace(*buildNumber)
+			var ipaBundleID string
+			if hasIPA {
+				ipaInfo, extractErr := shared.ExtractBundleInfoFromIPA(filePath)
+				if extractErr != nil {
+					return fmt.Errorf("builds upload: inspect IPA metadata: %w", extractErr)
+				}
+				ipaBundleID = strings.TrimSpace(ipaInfo.BundleID)
+				if ipaBundleID == "" {
+					return fmt.Errorf("builds upload: IPA top-level app Info.plist is missing CFBundleIdentifier")
+				}
+				if versionValue == "" {
+					versionValue = ipaInfo.Version
+				}
+				if buildNumberValue == "" {
+					buildNumberValue = ipaInfo.BuildNumber
+				}
+			} else if versionValue == "" || buildNumberValue == "" {
+				// PKG files require explicit version and build number
+				missingFlags := make([]string, 0, 2)
+				if versionValue == "" {
+					missingFlags = append(missingFlags, "--version")
+				}
+				if buildNumberValue == "" {
+					missingFlags = append(missingFlags, "--build-number")
+				}
+				return fmt.Errorf("builds upload: %s required for PKG uploads", strings.Join(missingFlags, " and "))
+			}
+			if versionValue == "" || buildNumberValue == "" {
+				missingFields := make([]string, 0, 2)
+				missingFlags := make([]string, 0, 2)
+				if versionValue == "" {
+					missingFields = append(missingFields, "CFBundleShortVersionString")
+					missingFlags = append(missingFlags, "--version")
+				}
+				if buildNumberValue == "" {
+					missingFields = append(missingFields, "CFBundleVersion")
+					missingFlags = append(missingFlags, "--build-number")
+				}
+				return fmt.Errorf("builds upload: missing Info.plist keys %s; provide %s", strings.Join(missingFields, " and "), strings.Join(missingFlags, " and "))
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("builds upload: %w", err)
+			}
+
+			timeoutValue := asc.ResolveTimeout()
+			if *wait || testNotesValue != "" {
+				timeoutValue = asc.ResolveTimeoutWithDefault(buildWaitDefaultTimeout)
+			}
+			requestCtx, cancel := shared.ContextWithTimeoutDuration(ctx, timeoutValue)
+			defer cancel()
+
+			if hasIPA {
+				resolvedAppID, err = shared.ResolveAppIDWithExactLookup(requestCtx, client, resolvedAppID)
+				if err != nil {
+					return fmt.Errorf("builds upload: %w", err)
+				}
+				appResp, err := client.GetApp(requestCtx, resolvedAppID)
+				if err != nil {
+					return fmt.Errorf("builds upload: fetch selected app %q: %w", resolvedAppID, err)
+				}
+				if appResp == nil {
+					return fmt.Errorf("builds upload: fetch selected app %q: empty response", resolvedAppID)
+				}
+				appBundleID := strings.TrimSpace(appResp.Data.Attributes.BundleID)
+				if appBundleID == "" {
+					return fmt.Errorf("builds upload: selected app %q has no bundle ID", resolvedAppID)
+				}
+				if !strings.EqualFold(ipaBundleID, appBundleID) {
+					appName := strings.TrimSpace(appResp.Data.Attributes.Name)
+					if appName == "" {
+						appName = resolvedAppID
+					}
+					return fmt.Errorf("builds upload: IPA bundle ID %q does not match selected app %q bundle ID %q", ipaBundleID, appName, appBundleID)
+				}
+			}
+
+			uploadResp, fileResp, err := shared.PrepareBuildUpload(requestCtx, client, resolvedAppID, fileInfo, versionValue, buildNumberValue, platformValue, fileUTI)
+			if err != nil {
+				return fmt.Errorf("builds upload: %w", err)
+			}
+
+			outputOperations := fileResp.Data.Attributes.UploadOperations
+			if *includeSensitive {
+				shared.WarnIncludeSensitive(os.Stderr, true)
+			} else {
+				outputOperations = asc.RedactUploadOperations(outputOperations)
+			}
+
+			// Return upload metadata. Capability-bearing URL and header values
+			// require an explicit per-invocation opt-in.
+			result := &asc.BuildUploadResult{
+				UploadID:   uploadResp.Data.ID,
+				FileID:     fileResp.Data.ID,
+				FileName:   fileResp.Data.Attributes.FileName,
+				FileSize:   fileResp.Data.Attributes.FileSize,
+				Operations: outputOperations,
+			}
+
+			if !*dryRun {
+				if len(fileResp.Data.Attributes.UploadOperations) == 0 {
+					return fmt.Errorf("builds upload: no upload operations returned")
+				}
+
+				uploadOpts := []asc.UploadOption{
+					asc.WithUploadConcurrency(*concurrency),
+				}
+				fmt.Fprintf(os.Stderr, "Uploading %s (%d bytes) to App Store Connect...\n", fileInfo.Name(), fileInfo.Size())
+				uploadCtx, uploadCancel := shared.ContextWithUploadTimeout(ctx)
+				err = asc.ExecuteUploadOperations(uploadCtx, filePath, fileResp.Data.Attributes.UploadOperations, uploadOpts...)
+				uploadCancel()
+				if err != nil {
+					return fmt.Errorf("builds upload: upload failed: %w", err)
+				}
+
+				var verifiedChecksums *asc.Checksums
+				var checksumVerified *bool
+				if *verifyChecksum {
+					src := fileResp.Data.Attributes.SourceFileChecksums
+					if src == nil || (src.File == nil && src.Composite == nil) {
+						fmt.Fprintln(os.Stderr, "Warning: --checksum requested but API provided no checksums to verify; skipping")
+					} else {
+						checksums, err := asc.VerifySourceFileChecksums(filePath, src)
+						if err != nil {
+							return fmt.Errorf("builds upload: checksum verification failed: %w", err)
+						}
+						verifiedChecksums = checksums
+						verified := true
+						checksumVerified = &verified
+					}
+				}
+
+				commitCtx, commitCancel := shared.ContextWithUploadTimeout(ctx)
+				commitResp, err := shared.CommitBuildUploadFile(commitCtx, client, uploadResp.Data.ID, fileResp.Data.ID, verifiedChecksums)
+				commitCancel()
+				if err != nil {
+					return fmt.Errorf("builds upload: %w", err)
+				}
+
+				if commitResp != nil && commitResp.Data.Attributes.Uploaded != nil {
+					result.Uploaded = commitResp.Data.Attributes.Uploaded
+				} else {
+					uploaded := true
+					result.Uploaded = &uploaded
+				}
+				fmt.Fprintln(os.Stderr, "Upload committed in App Store Connect.")
+				result.ChecksumVerified = checksumVerified
+				result.SourceFileChecksums = verifiedChecksums
+				result.Operations = nil
+
+				if *wait || testNotesValue != "" {
+					fmt.Fprintf(os.Stderr, "Waiting for build %s (%s) to appear in App Store Connect...\n", buildNumberValue, versionValue)
+					buildResp, err := shared.WaitForBuildByNumberOrUploadFailure(requestCtx, client, resolvedAppID, uploadResp.Data.ID, versionValue, buildNumberValue, string(platformValue), *pollInterval)
+					if err != nil {
+						return fmt.Errorf("builds upload: %w", err)
+					}
+					if buildResp == nil {
+						return fmt.Errorf("builds upload: failed to resolve build for version %q build %q", versionValue, buildNumberValue)
+					}
+
+					fmt.Fprintf(os.Stderr, "Build %s discovered; waiting for processing...\n", buildResp.Data.ID)
+					buildResp, err = client.WaitForBuildProcessing(requestCtx, buildResp.Data.ID, *pollInterval)
+					if err != nil {
+						return fmt.Errorf("builds upload: %w", err)
+					}
+
+					if testNotesValue != "" {
+						if _, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, testNotesValue); err != nil {
+							return fmt.Errorf("builds upload: %w", err)
+						}
+					}
+				} else if *verifyTimeout > 0 {
+					fmt.Fprintf(os.Stderr, "Verifying initial App Store Connect processing for up to %s...\n", verifyTimeout.String())
+					if err := shared.VerifyBuildUploadAfterCommit(ctx, client, resolvedAppID, uploadResp.Data.ID, *pollInterval, *verifyTimeout); err != nil {
+						return fmt.Errorf("builds upload: %w", err)
+					}
+				}
+			}
+
+			format := *output.Output
+
+			return shared.PrintOutput(result, format, *output.Pretty)
+		},
+	}
+}
+
+// BuildsCommand returns the builds command with subcommands
+func BuildsCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("builds", flag.ExitOnError)
+
+	// Parent command has no flags - subcommands define their own
+	listCmd := BuildsListCommand()
+
+	return &ffcli.Command{
+		Name:       "builds",
+		ShortUsage: "asc builds <subcommand> [flags]",
+		ShortHelp:  "Manage builds in App Store Connect.",
+		LongHelp: `Manage builds in App Store Connect.
+
+Examples:
+  asc builds list --app "123456789"
+  asc builds count --app "123456789"
+  asc builds wait --build-id "BUILD_ID"
+  asc builds wait --app "123456789" --latest
+  asc builds info --build-id "BUILD_ID"
+  asc builds info --app "123456789" --latest
+  asc builds info --app "123456789" --latest --version "1.2.3" --platform IOS
+  asc builds info --app "123456789" --build-number "42"
+  asc builds next-build-number --app "123456789" --version "1.2.3" --platform IOS
+  asc builds expire --app "123456789" --latest --confirm
+  asc builds expire-all --app "123456789" --older-than 90d --dry-run
+  asc builds upload --app "123456789" --ipa "app.ipa"
+  asc builds upload --app "123456789" --pkg "app.pkg" --version "1.0.0" --build-number "1"
+  asc builds uploads list --app "123456789"
+  asc builds test-notes list --build-id "BUILD_ID"
+  asc builds individual-testers list --app "123456789" --latest
+  asc builds update --app "123456789" --latest --uses-non-exempt-encryption=false
+  asc builds add-groups --app "123456789" --latest --group "GROUP_ID"
+  asc builds add-groups --app "123456789" --latest --group "GROUP_ID" --submit --confirm
+  asc builds remove-groups --app "123456789" --latest --group "GROUP_ID" --confirm
+  asc builds app view --app "123456789" --latest
+  asc builds pre-release-version view --app "123456789" --latest
+  asc builds icons list --app "123456789" --latest
+  asc builds beta-app-review-submission view --app "123456789" --latest
+  asc builds build-beta-detail view --app "123456789" --latest
+  asc builds links view --app "123456789" --latest --type "app"
+  asc builds metrics beta-usages --app "123456789" --latest
+  asc builds dsyms --build-id "BUILD_ID" --output-dir "./dsyms"`,
+		FlagSet:   fs,
+		UsageFunc: shared.VisibleUsageFunc,
+		Subcommands: []*ffcli.Command{
+			listCmd,
+			BuildsCountCommand(),
+			BuildsNextBuildNumberCommand(),
+			BuildsWaitCommand(),
+			BuildsInfoCommand(),
+			BuildsExpireCommand(),
+			BuildsExpireAllCommand(),
+			BuildsUploadCommand(),
+			BuildsUploadsCommand(),
+			BuildsTestNotesCommand(),
+			BuildsAppEncryptionDeclarationCommand(),
+			BuildsUpdateCommand(),
+			BuildsAddGroupsCommand(),
+			BuildsRemoveGroupsCommand(),
+			BuildsIndividualTestersCommand(),
+			BuildsAppCommand(),
+			BuildsPreReleaseVersionCommand(),
+			BuildsIconsCommand(),
+			BuildsBetaAppReviewSubmissionCommand(),
+			BuildsBuildBetaDetailCommand(),
+			BuildsRelationshipsCommand(),
+			BuildsMetricsCommand(),
+			BuildsDsymsCommand(),
+		},
+		Exec: func(ctx context.Context, args []string) error {
+			return flag.ErrHelp
+		},
+	}
+}
+
+// BuildsListCommand returns the builds list subcommand
+func BuildsListCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+
+	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (or ASC_APP_ID env)")
+	legacyAppID := shared.BindDeprecatedStringFlagAlias(fs, "app-id", "app")
+	output := shared.BindOutputFlags(fs)
+	sort := fs.String("sort", "", "Sort by uploadedDate or -uploadedDate")
+	version := fs.String("version", "", "Filter by marketing version string (CFBundleShortVersionString)")
+	buildNumber := fs.String("build-number", "", "Filter by build number (CFBundleVersion)")
+	platform := fs.String("platform", "", "Filter by platform: IOS, MAC_OS, TV_OS, VISION_OS")
+	processingState := fs.String("processing-state", "", "Filter by processing state: VALID, PROCESSING, FAILED, INVALID, or all")
+	excludeExpired := fs.Bool("exclude-expired", false, "Exclude expired builds")
+	notExpired := fs.Bool("not-expired", false, "Alias for --exclude-expired")
+	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
+	next := fs.String("next", "", "Fetch next page using a links.next URL")
+	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+
+	return &ffcli.Command{
+		Name:       "list",
+		ShortUsage: "asc builds list [flags]",
+		ShortHelp:  "List builds for an app in App Store Connect.",
+		LongHelp: `List builds for an app in App Store Connect.
+
+This command fetches builds uploaded to App Store Connect,
+including processing status and expiration dates.
+
+Examples:
+  asc builds list --app "123456789"
+  asc builds list --app "123456789" --version "1.2.3"
+  asc builds list --app "123456789" --build-number "123"
+  asc builds list --app "123456789" --platform TV_OS
+  asc builds list --app "123456789" --platform IOS --version "1.2.3"
+  asc builds list --app "123456789" --processing-state "PROCESSING"
+  asc builds list --app "123456789" --processing-state "all"
+  asc builds list --app "123456789" --exclude-expired
+  asc builds list --app "123456789" --version "1.2.3" --build-number "123"
+  asc builds list --app "123456789" --limit 10
+  asc builds list --app "123456789" --paginate`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if err := legacyAppID.Apply(appID); err != nil {
+				return err
+			}
+			if *limit != 0 && (*limit < 1 || *limit > 200) {
+				return fmt.Errorf("builds: --limit must be between 1 and 200")
+			}
+			nextValue := strings.TrimSpace(*next)
+			if err := shared.ValidateNextURL(nextValue); err != nil {
+				return fmt.Errorf("builds: %w", err)
+			}
+			if err := shared.ValidateSort(*sort, "uploadedDate", "-uploadedDate"); err != nil {
+				return fmt.Errorf("builds: %w", err)
+			}
+
+			platformValue := ""
+			if strings.TrimSpace(*platform) != "" {
+				normalizedPlatform, err := shared.NormalizePlatform(*platform)
+				if err != nil {
+					return shared.UsageError(err.Error())
+				}
+				platformValue = string(normalizedPlatform)
+			}
+
+			versionValue := strings.TrimSpace(*version)
+			buildNumberValue := strings.TrimSpace(*buildNumber)
+			processingStateValues, err := normalizeBuildProcessingStateFilter(*processingState)
+			if err != nil {
+				return err
+			}
+
+			resolvedAppID := shared.ResolveAppID(*appID)
+			if resolvedAppID == "" && nextValue == "" {
+				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("builds: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			if resolvedAppID != "" && nextValue == "" {
+				resolvedAppID, err = shared.ResolveAppIDWithLookup(requestCtx, client, resolvedAppID)
+				if err != nil {
+					return fmt.Errorf("builds: %w", err)
+				}
+			}
+
+			preReleaseVersionIDs := []string{}
+			if versionValue != "" && nextValue == "" {
+				preReleaseVersionIDs, err = findPreReleaseVersionIDsForBuildsList(requestCtx, client, resolvedAppID, versionValue)
+				if err != nil {
+					return fmt.Errorf("builds: %w", err)
+				}
+				if len(preReleaseVersionIDs) == 0 {
+					return shared.PrintOutput(&asc.BuildsResponse{Data: []asc.Resource[asc.BuildAttributes]{}}, *output.Output, *output.Pretty)
+				}
+			}
+
+			opts := []asc.BuildsOption{
+				asc.WithBuildsLimit(*limit),
+				asc.WithBuildsNextURL(nextValue),
+				asc.WithBuildsInclude([]string{"preReleaseVersion"}),
+			}
+			if strings.TrimSpace(*sort) != "" {
+				opts = append(opts, asc.WithBuildsSort(*sort))
+			}
+			if buildNumberValue != "" {
+				opts = append(opts, asc.WithBuildsBuildNumber(buildNumberValue))
+			}
+			if platformValue != "" {
+				opts = append(opts, asc.WithBuildsPreReleaseVersionPlatforms([]string{platformValue}))
+			}
+			if len(processingStateValues) > 0 {
+				opts = append(opts, asc.WithBuildsProcessingStates(processingStateValues))
+			}
+			if *excludeExpired || *notExpired {
+				opts = append(opts, asc.WithBuildsExpired(false))
+			}
+			if len(preReleaseVersionIDs) > 0 {
+				opts = append(opts, asc.WithBuildsPreReleaseVersions(preReleaseVersionIDs))
+			}
+
+			if *paginate {
+				paginateOpts := append(opts, asc.WithBuildsLimit(200))
+				builds, err := shared.PaginateWithSpinner(
+					requestCtx,
+					func(ctx context.Context) (asc.PaginatedResponse, error) {
+						return client.GetBuilds(ctx, resolvedAppID, paginateOpts...)
+					},
+					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+						return client.GetBuilds(ctx, resolvedAppID, asc.WithBuildsNextURL(nextURL))
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("builds: %w", err)
+				}
+
+				format := *output.Output
+				return shared.PrintOutput(builds, format, *output.Pretty)
+			}
+
+			builds, err := client.GetBuilds(requestCtx, resolvedAppID, opts...)
+			if err != nil {
+				return fmt.Errorf("builds: failed to fetch: %w", err)
+			}
+
+			format := *output.Output
+
+			return shared.PrintOutput(builds, format, *output.Pretty)
+		},
+	}
+}
+
+func normalizeBuildProcessingStateFilter(raw string) ([]string, error) {
+	return shared.NormalizeBuildProcessingStateFilter(raw, shared.BuildProcessingStateFilterOptions{
+		FlagName:          "--processing-state",
+		AllowedValuesHelp: "VALID, PROCESSING, FAILED, INVALID, or all",
+	})
+}
+
+func findPreReleaseVersionIDsForBuildsList(
+	ctx context.Context,
+	client *asc.Client,
+	appID string,
+	version string,
+) ([]string, error) {
+	version = strings.TrimSpace(version)
+
+	firstPage, err := client.GetPreReleaseVersions(
+		ctx,
+		appID,
+		asc.WithPreReleaseVersionsVersion(version),
+		asc.WithPreReleaseVersionsLimit(200),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup pre-release versions for marketing version %q: %w", version, err)
+	}
+
+	ids := make([]string, 0, len(firstPage.Data))
+	seen := make(map[string]struct{}, len(firstPage.Data))
+	appendIDs := func(page *asc.PreReleaseVersionsResponse) {
+		for _, preReleaseVersion := range page.Data {
+			// ASC's version filter can return dotted-version near-matches like
+			// 1.1 and 1.1.0 together, so enforce exact matching client-side
+			// when the response includes attributes.version. If ASC omits the
+			// attribute entirely, trust the server-side filter instead.
+			versionAttr := strings.TrimSpace(preReleaseVersion.Attributes.Version)
+			if versionAttr != "" && versionAttr != version {
+				continue
+			}
+			id := strings.TrimSpace(preReleaseVersion.ID)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+
+	err = asc.PaginateEach(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetPreReleaseVersions(ctx, appID, asc.WithPreReleaseVersionsNextURL(nextURL))
+	}, func(page asc.PaginatedResponse) error {
+		resp, ok := page.(*asc.PreReleaseVersionsResponse)
+		if !ok {
+			return fmt.Errorf("unexpected pre-release versions page type %T", page)
+		}
+		appendIDs(resp)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to paginate pre-release versions for marketing version %q: %w", version, err)
+	}
+
+	return ids, nil
+}
+
+func attachBuildInfoPreReleaseVersion(
+	ctx context.Context,
+	client *asc.Client,
+	build *asc.BuildResponse,
+) error {
+	if client == nil || build == nil {
+		return nil
+	}
+	if strings.TrimSpace(build.Data.ID) == "" {
+		return nil
+	}
+
+	preReleaseVersion, err := client.GetBuildPreReleaseVersion(ctx, build.Data.ID)
+	if err != nil {
+		return nil
+	}
+
+	included, err := json.Marshal([]asc.PreReleaseVersion{preReleaseVersion.Data})
+	if err != nil {
+		return fmt.Errorf("failed to encode pre-release version include: %w", err)
+	}
+	build.Included = included
+
+	relationships, err := mergeBuildRelationship(build.Data.Relationships, "preReleaseVersion", map[string]any{
+		"preReleaseVersion": map[string]any{
+			"data": map[string]string{
+				"type": "preReleaseVersions",
+				"id":   preReleaseVersion.Data.ID,
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	build.Data.Relationships = relationships
+	return nil
+}
+
+func mergeBuildRelationship(relationships json.RawMessage, key string, value map[string]any) (json.RawMessage, error) {
+	merged := make(map[string]json.RawMessage)
+	if len(relationships) > 0 {
+		if err := json.Unmarshal(relationships, &merged); err != nil {
+			return nil, fmt.Errorf("failed to decode existing build relationships: %w", err)
+		}
+	}
+
+	entry, ok := value[key]
+	if !ok {
+		return nil, fmt.Errorf("missing %s relationship payload", key)
+	}
+	encodedEntry, err := json.Marshal(entry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode %s relationship: %w", key, err)
+	}
+	merged[key] = encodedEntry
+
+	raw, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode merged build relationships: %w", err)
+	}
+	return raw, nil
+}
+
+// BuildsInfoCommand returns a build info subcommand.
+func BuildsInfoCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("builds info", flag.ExitOnError)
+
+	buildID := fs.String("build-id", "", "Build ID")
+	legacyBuildID := bindHiddenStringFlag(fs, "build")
+	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required when --build-id is not provided)")
+	latest := fs.Bool("latest", false, "Show details for the latest build in --app context")
+	version := fs.String("version", "", "Optional marketing version filter (CFBundleShortVersionString) for --app selectors")
+	buildNumber := fs.String("build-number", "", "Build number (CFBundleVersion) for --app unique lookup")
+	platform := fs.String("platform", "", "Optional platform filter for app-scoped selectors: IOS, MAC_OS, TV_OS, VISION_OS")
+	processingState := fs.String("processing-state", "", "Optional processing state filter for --latest: VALID, PROCESSING, FAILED, INVALID, or all")
+	excludeExpired := fs.Bool("exclude-expired", false, "Exclude expired builds when resolving --latest")
+	notExpired := fs.Bool("not-expired", false, "Alias for --exclude-expired")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "info",
+		ShortUsage: "asc builds info [--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER] [flags]",
+		ShortHelp:  "Show details for a specific build.",
+		LongHelp: `Show details for a specific build.
+
+Selector modes:
+  --build-id BUILD_ID
+  --app APP --latest [--version VERSION] [--platform PLATFORM]
+                     [--processing-state STATES]
+                     [--exclude-expired | --not-expired]
+  --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]
+
+Examples:
+  asc builds info --build-id "BUILD_ID"
+  asc builds info --app "123456789" --latest
+  asc builds info --app "123456789" --latest --version "1.2.3" --platform IOS
+  asc builds info --app "123456789" --latest --processing-state "PROCESSING,VALID"
+  asc builds info --app "123456789" --build-number "42"
+  asc builds info --app "123456789" --build-number "42" --version "1.2.3" --platform IOS`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if err := applyLegacyBuildIDAlias(buildID, legacyBuildID); err != nil {
+				return err
+			}
+			excludeExpiredValue := *excludeExpired || *notExpired
+			processingStateValues, err := normalizeBuildProcessingStateFilter(*processingState)
+			if err != nil {
+				return err
+			}
+
+			resolveOpts := ResolveBuildOptions{
+				BuildID:               strings.TrimSpace(*buildID),
+				AppID:                 strings.TrimSpace(*appID),
+				Version:               strings.TrimSpace(*version),
+				BuildNumber:           strings.TrimSpace(*buildNumber),
+				Platform:              strings.TrimSpace(*platform),
+				Latest:                *latest,
+				ProcessingStateValues: processingStateValues,
+				ExcludeExpired:        excludeExpiredValue,
+			}
+			if err := validateResolveBuildOptions(resolveOpts); err != nil {
+				return err
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("builds info: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			build, err := ResolveBuild(requestCtx, client, resolveOpts)
+			if err != nil {
+				return fmt.Errorf("builds info: %w", err)
+			}
+			if err := attachBuildInfoPreReleaseVersion(requestCtx, client, build); err != nil {
+				return fmt.Errorf("builds info: %w", err)
+			}
+
+			format := *output.Output
+
+			return shared.PrintOutput(build, format, *output.Pretty)
+		},
+	}
+}
+
+// BuildsExpireCommand returns a build expiration subcommand.
+func BuildsExpireCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("builds expire", flag.ExitOnError)
+
+	selectors := bindBuildSelectorFlags(fs, buildSelectorFlagOptions{})
+	confirm := fs.Bool("confirm", false, "Confirm expiration")
+	output := shared.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "expire",
+		ShortUsage: "asc builds expire (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER [--version VERSION] [--platform PLATFORM]) --confirm [flags]",
+		ShortHelp:  "Expire a build for TestFlight.",
+		LongHelp: `Expire a build for TestFlight.
+
+This action is irreversible for the specified build.
+
+Examples:
+  asc builds expire --build-id "BUILD_ID" --confirm
+  asc builds expire --app "123456789" --latest --confirm`,
+		FlagSet:   fs,
+		UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if err := selectors.applyLegacyAliases(); err != nil {
+				return err
+			}
+			if err := selectors.validate(); err != nil {
+				return err
+			}
+			if !*confirm {
+				fmt.Fprintln(os.Stderr, "Error: --confirm is required to expire build")
+				return shared.MissingRequiredUsageError()
+			}
+
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("builds expire: %w", err)
+			}
+
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+
+			buildID, err := selectors.resolveBuildID(requestCtx, client)
+			if err != nil {
+				return fmt.Errorf("builds expire: %w", err)
+			}
+
+			build, err := client.ExpireBuild(requestCtx, buildID)
+			if err != nil {
+				return fmt.Errorf("builds expire: failed to expire: %w", err)
+			}
+
+			format := *output.Output
+
+			return shared.PrintOutput(build, format, *output.Pretty)
+		},
+	}
+}

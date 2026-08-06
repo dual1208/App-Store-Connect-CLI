@@ -1,0 +1,14 @@
+# Certificates
+
+> Manage certificate resources through the App Store Connect API.
+
+```bash
+asc certificates list
+asc certificates view --id CERTIFICATE_ID
+asc certificates create --certificate-type IOS_DISTRIBUTION --csr ./request.csr
+asc certificates revoke --id CERTIFICATE_ID --confirm
+```
+
+Certificate creation requires a locally generated certificate-signing request. The CLI sends the CSR to App Store Connect and returns the certificate resource; it does not manage operating-system credential stores or private signing keys.
+
+Use `--output json` for automation and inspect `asc certificates --help` for the current flags.

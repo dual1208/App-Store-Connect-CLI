@@ -1,0 +1,11 @@
+# Signing
+
+> Download App Store Connect certificate and provisioning-profile resources.
+
+```bash
+asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --output ./signing-assets
+asc certificates list
+asc profiles list
+```
+
+These commands operate on App Store Connect resources and ordinary output files. They do not install identities or modify operating-system credential stores. Keep private signing keys outside the repository and perform signing with an explicitly configured build environment.

@@ -1,0 +1,17 @@
+# Authentication profiles
+
+> Select among named App Store Connect API keys stored in a private config file.
+
+```bash
+asc auth login --name personal --key-id KEY1 --issuer-id ISSUER --private-key /secure/AuthKey1.p8
+asc auth login --name company --key-id KEY2 --issuer-id ISSUER --private-key /secure/AuthKey2.p8
+asc auth switch --name company
+asc apps list
+asc --profile personal apps list
+```
+
+Profiles live in `~/.asc/config.json`, or `./.asc/config.json` when created with `--local`. `ASC_CONFIG_PATH` selects an explicit file. The file records the private-key path; it does not copy the key material.
+
+Resolution order is an explicitly selected file profile, the default file profile, then a complete environment credential set. `ASC_STRICT_AUTH=true` rejects ambiguous mixed sources.
+
+Keep the profile directory at mode `0700` and every credential-bearing file at mode `0600`. Files must be regular, current-user-owned, non-symlink files with exactly one hard link.

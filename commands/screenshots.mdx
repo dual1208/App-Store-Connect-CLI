@@ -1,0 +1,45 @@
+# screenshots
+
+> Upload and manage App Store screenshots
+
+The `screenshots` command uses authenticated App Store Connect APIs to list,
+validate, upload, download, and delete App Store screenshot assets.
+
+## Commands
+
+```bash
+asc screenshots list --version-localization "VERSION_LOCALIZATION_ID"
+asc screenshots sizes
+asc screenshots validate --path "./screenshots/iphone" --device-type IPHONE_65
+asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" \
+  --path "./screenshots/iphone" --device-type IPHONE_65
+asc screenshots download --version-localization "VERSION_LOCALIZATION_ID" \
+  --output-dir "./screenshots/downloaded"
+asc screenshots delete --id "SCREENSHOT_ID" --confirm
+```
+
+`--version-localization` expects an App Store version-localization resource ID,
+not a locale string. Resolve it with:
+
+```bash
+asc localizations list --version "VERSION_ID" --locale "en-US" --output json
+```
+
+For supported display types and dimensions, run `asc screenshots sizes --all`.
+Use `asc screenshots validate` before upload to catch unsupported file types,
+dimensions, or ordering issues without mutating App Store Connect.
+
+## Upload an app-wide directory
+
+When files are arranged by locale, the upload command can resolve version
+localizations from an app and version string:
+
+```bash
+asc screenshots upload \
+  --app "APP_ID" \
+  --version "1.2.3" \
+  --path "./screenshots" \
+  --device-type IPHONE_65
+```
+
+Use `--output json` for automation and `--confirm` for destructive deletion.

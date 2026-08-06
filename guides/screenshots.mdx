@@ -1,0 +1,49 @@
+# App Store screenshots
+
+Use the authenticated screenshot commands to validate local image files and
+manage the corresponding App Store Connect assets.
+
+## 1. Resolve a localization
+
+```bash
+asc localizations list --version "VERSION_ID" --locale "en-US" --output json
+```
+
+## 2. Inspect requirements and validate files
+
+```bash
+asc screenshots sizes --all
+asc screenshots validate \
+  --path "./screenshots/en-US/iphone" \
+  --device-type IPHONE_65
+```
+
+## 3. Upload
+
+```bash
+asc screenshots upload \
+  --version-localization "VERSION_LOCALIZATION_ID" \
+  --path "./screenshots/en-US/iphone" \
+  --device-type IPHONE_65
+```
+
+For a directory organized by locale, supply `--app` and `--version` instead of
+a localization ID.
+
+## 4. Verify or download
+
+```bash
+asc screenshots list --version-localization "VERSION_LOCALIZATION_ID" --output table
+asc screenshots download \
+  --version-localization "VERSION_LOCALIZATION_ID" \
+  --output-dir "./screenshots/downloaded"
+```
+
+## 5. Delete
+
+```bash
+asc screenshots delete --id "SCREENSHOT_ID" --confirm
+```
+
+Deletion is destructive. List the remote screenshots immediately before
+deleting and verify the resource ID.
